@@ -1,4 +1,4 @@
-"""Standalone Phase 1 inspection and matter-search entry point."""
+"""Standalone Phase 1 inspection and matter-details entry point."""
 
 import argparse
 import asyncio
@@ -18,7 +18,7 @@ def matter_argument(value: str) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Inspect UARB or search and verify a matter, saving DOM/screenshot/trace.",
+        description="Inspect UARB or collect verified matter metadata and counts, saving evidence.",
     )
     parser.add_argument("--matter", type=matter_argument, help="Matter number, for example M12205")
     parser.add_argument("--output", type=Path, default=Path("artifacts"))
@@ -41,7 +41,15 @@ def main() -> int:
     print(f"Evidence: {directory.resolve() / 'report.json'}")
     if report.get("verified_matter_number"):
         print(f"Verified matter: {report['verified_matter_number']}")
-    print("Metadata, category counts, and download remain unverified.")
+    if report.get("metadata_counts_complete"):
+        for name, value in report["matter_metadata"].items():
+            print(f"{name.replace('_', ' ').capitalize()}: {value if value is not None else '(not provided)'}")
+        for category, count in report["category_counts"].items():
+            print(f"{category}: {count}")
+        print(f"Total documents: {report['total_document_count']}")
+        print("Metadata and category counts captured; download remains unverified.")
+    else:
+        print("Metadata, category counts, and download remain unverified.")
     if report["status"] == "failed":
         encoding = sys.stdout.encoding or "utf-8"
         print(report["error"]["message"].encode(encoding, errors="backslashreplace").decode(encoding))

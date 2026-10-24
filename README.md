@@ -1,8 +1,8 @@
 # Senpilot Regulatory Document AI Agent
 
-Phase 1 is **in progress; matter search and detail-page verification work**. This
-repository provides a Playwright inspection/search command and offline tests.
-It does **not** yet extract metadata/counts or download a UARB document.
+Phase 1 is **in progress; verified matter metadata and category counts work**.
+This repository provides a Playwright inspection/details command and offline
+tests. It does **not** yet download a UARB document.
 
 The target milestone is to retrieve live metadata and all five category counts
 for `M12205`, then download and validate one file from **Other Documents**. Values
@@ -12,8 +12,8 @@ in the assignment PDF are examples, never application defaults.
 
 ```text
 src/senpilot_agent/
-  cli.py       # Standalone inspection and matter-search command
-  probe.py     # Async Playwright search, verification, and evidence
+  cli.py       # Standalone inspection and matter-details command
+  probe.py     # Async Playwright search, metadata/count extraction, and evidence
   files.py     # Safe filenames, basic format checks, SHA-256
 tests/         # Offline tests; no requests to the public site
 docs/          # Assignment and investigation notes
@@ -58,7 +58,7 @@ $env:PYTHONPATH = "$PWD\src"
 
 ## Searching and reading the evidence
 
-To open and verify a supplied matter in a fresh browser session:
+To search, verify, and extract details for a supplied matter in a fresh session:
 
 ```powershell
 $env:PLAYWRIGHT_BROWSERS_PATH = "$PWD\.cache\ms-playwright"
@@ -77,6 +77,17 @@ the associated direct-matter Search button, and waits for detail data or the
 observed No Records Found response. Ambiguous controls, missing data, mismatches,
 and timeouts fail without automatic retries.
 
+After verification, the command reads the title, status, type, category, date
+received, decision date, and outcome from their observed detail-page widgets.
+Dates retain the site's displayed format. The title must be nonempty; blank
+optional values are reported as `null`. Missing or ambiguous widgets fail instead
+of being interpreted as blank values.
+
+Each of the five document-category buttons is read independently. Counts must
+be nonnegative integers; explicit zero counts are valid, but missing, ambiguous,
+or malformed counts fail. Their sum is the total across those five categories.
+No category tab is opened and no document is downloaded during this step.
+
 Each invocation creates a unique directory under `artifacts/` with `report.json`.
 When browser startup/navigation succeeds, it also attempts to save:
 
@@ -88,15 +99,26 @@ When browser startup/navigation succeeds, it also attempts to save:
 .\.venv\Scripts\python.exe -m playwright show-trace artifacts\RUN_DIRECTORY\trace.zip
 ```
 
-`matter_found` and exit code 0 mean the detail identifier was verified. The report
-records `intended_request.matter_number` and `verified_matter_number`; mismatches
-also record `observed_matter_number`. `inspection_captured` and exit code 0 mean
-inspection completed without a search. `failed` exits with code 1 and records
-the error and stage, including `locate_matter_field`, `submit_matter_search`, or
-`verify_matter`. Failure evidence uses the same directory structure.
+`matter_found` and exit code 0 mean the detail identifier was verified and metadata
+and counts were captured. The report records `intended_request.matter_number`,
+`observed_matter_number`, and `verified_matter_number`. It also includes:
 
-`phase1_milestone_complete` remains false because metadata, counts, and a validated
-download are still pending. `--timeout-ms 60000` changes bounded browser/element
+- `matter_metadata`: `matter_number`, `title`, `status`, `type`, `category`,
+  `date_received`, `decision_date`, and `outcome`.
+- `category_counts`: integer counts keyed by Exhibits, Key Documents, Other
+  Documents, Transcripts, and Recordings.
+- `total_document_count`: their sum; `null` until every count has been validated.
+- `metadata_counts_complete`: true only after both extraction steps succeed.
+
+`inspection_captured` and exit code 0 mean inspection completed without a search.
+`failed` exits with code 1 and records the error and stage, including
+`locate_matter_field`, `submit_matter_search`, `verify_matter`, `extract_metadata`,
+or `extract_category_counts`. A verified identifier remains available if later
+extraction fails; completed metadata is also retained if count extraction fails.
+Failure evidence uses the same directory structure.
+
+`phase1_milestone_complete` remains false because a persisted, validated download
+is still pending. `--timeout-ms 60000` changes bounded browser/element
 timeouts. `--inspect-seconds` adds an optional debugging pause **after** the
 requested workflow succeeds; it is not an application readiness condition.
 
@@ -116,15 +138,18 @@ FileMaker layout-object classes distinguish the direct Search button and
 read-only result field. No session-specific element IDs or button indexes are
 used. A site layout change may require updating those selectors.
 
-The next milestone is extracting matter metadata and all five category counts,
-followed by one persisted and validated download. Selecting Other Documents and
-the first Go Get It action still needs investigation: whether it emits a download
-event, opens a popup, or navigates to a file remains unknown. ZIP creation and
-email integration remain deferred.
+Metadata and all five category counts were also verified in a fresh live M12205
+run, with structured output compared against the saved page text and screenshot.
+The next milestone is one persisted and validated download. Selecting Other
+Documents and the first Go Get It action still needs investigation: whether it
+emits a download event, opens a popup, or navigates to a file remains unknown.
+ZIP creation and email integration remain deferred.
 
 The offline browser fixtures reproduce the observed styled-div activation,
 Tab commit, three Search controls, asynchronous detail data, and no-result
-feedback. They cover success and workflow failures without contacting UARB.
+feedback, followed by delayed metadata and category-count updates. They cover
+success, zero counts, blank optional fields, malformed/missing counts, missing or
+ambiguous widgets, and workflow timeouts without contacting UARB.
 Install Chromium as above before running the complete suite.
 
 The existing validator rejects empty files, HTML error responses, basic malformed

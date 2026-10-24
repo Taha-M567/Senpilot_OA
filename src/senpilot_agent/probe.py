@@ -1,4 +1,4 @@
-"""Inspect UARB or search and verify its matter detail page, retaining evidence."""
+"""Inspect UARB or collect verified matter metadata and counts, retaining evidence."""
 
 from datetime import datetime, timezone
 import json
@@ -42,9 +42,13 @@ async def inspect_site(
     report = {
         "started_at": datetime.now(timezone.utc).isoformat(),
         "url": UARB_URL,
-        "purpose": "Search and verify a matter" if matter_number else "Inspect the live DOM",
+        "purpose": "Collect matter metadata and category counts" if matter_number else "Inspect the live DOM",
         "intended_request": {"matter_number": matter_number},
         "verified_matter_number": None,
+        "matter_metadata": {},
+        "category_counts": {},
+        "total_document_count": None,
+        "metadata_counts_complete": False,
         "phase1_milestone_complete": False,
         "status": "starting",
         "stage": "import_playwright",
@@ -118,7 +122,8 @@ async def inspect_site(
                     "[contenteditable=true]:visible"
                 ).first.wait_for(state="visible")
                 if matter_number is not None:
-                    await _search_matter(page, matter_number, report)
+                    detail = await _search_matter(page, matter_number, report)
+                    await _extract_matter_details(detail, report, timeout_ms)
                 if inspect_seconds:
                     # Explicit human inspection window, not a readiness heuristic.
                     import asyncio
@@ -143,7 +148,7 @@ async def inspect_site(
                     )
                     report["frames"].append({"index": index, "controls": controls})
                 report["status"] = "matter_found" if matter_number is not None else "inspection_captured"
-                report["stage"] = "verify_matter" if matter_number is not None else "inspect_dom"
+                report["stage"] = "extract_category_counts" if matter_number is not None else "inspect_dom"
             finally:
                 if page is not None:
                     try:
@@ -174,7 +179,7 @@ async def inspect_site(
     return run_dir, report
 
 
-async def _search_matter(page, matter_number: str, report: dict) -> None:
+async def _search_matter(page, matter_number: str, report: dict):
     report["stage"] = "locate_matter_field"
     search = page.locator(".iwps_body").filter(
         has=page.get_by_text("Go Directly to Matter", exact=True),
@@ -207,3 +212,46 @@ async def _search_matter(page, matter_number: str, report: dict) -> None:
     if observed != matter_number:
         raise RuntimeError(f"Matter identifier mismatch: requested {matter_number}, observed {observed!r}")
     report["verified_matter_number"] = observed
+    return detail
+
+
+async def _extract_matter_details(detail, report: dict, timeout_ms: int) -> None:
+    from playwright.async_api import expect
+
+    report["stage"] = "extract_metadata"
+    # shortcut: UARB layout classes are site-specific; recheck them after layout changes.
+    title = detail.locator(".csFM-4BAC3292-04BC-FC44-A278-B61F356EAB45 .text")
+    await expect(title, "Matter title must be nonempty").to_have_text(
+        re.compile(r"\S"), timeout=timeout_ms, use_inner_text=True,
+    )
+    metadata = {
+        "matter_number": report["verified_matter_number"],
+        "title": (await title.inner_text()).strip(),
+    }
+    for name, object_number in {
+        "status": 289, "type": 287, "category": 298,
+        "date_received": 292, "decision_date": 294, "outcome": 295,
+    }.items():
+        field = detail.locator(f".fm_object_{object_number}.v-readonly .text")
+        await field.wait_for(state="visible")
+        metadata[name] = (await field.inner_text()).strip() or None
+    report["matter_metadata"] = metadata
+
+    report["stage"] = "extract_category_counts"
+    counts = {}
+    for category in ("Exhibits", "Key Documents", "Other Documents", "Transcripts", "Recordings"):
+        button = detail.locator(".fm_object_276").get_by_role(
+            "button", name=re.compile(rf"^{re.escape(category)}(?:\s|$)"),
+        )
+        pattern = re.compile(rf"^{re.escape(category)}\s*-\s*([0-9]+)\s*$")
+        await expect(button, f"Invalid or unavailable count for {category}").to_have_text(
+            pattern, timeout=timeout_ms, use_inner_text=True,
+        )
+        label = await button.inner_text()
+        match = pattern.fullmatch(label)
+        if match is None:
+            raise ValueError(f"Invalid count for {category}: {label!r}")
+        counts[category] = int(match.group(1))
+    report["category_counts"] = counts
+    report["total_document_count"] = sum(counts.values())
+    report["metadata_counts_complete"] = True

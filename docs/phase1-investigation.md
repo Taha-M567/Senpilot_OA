@@ -112,10 +112,51 @@ existing tests and new CLI/browser-fixture coverage. The browser fixture is a
 reduced version of observed markup with local event handlers, not a replay of
 server internals.
 
+## Metadata and category counts verified
+
+Fresh search evidence at `artifacts/20261024T224317Z_89aa3802/` confirmed the
+detail widgets used for extraction. Type, status, date received, decision date,
+outcome, and category use read-only layout objects 287, 289, 292, 294, 295, and
+298 respectively. The title is the text widget within layout class
+`csFM-4BAC3292-04BC-FC44-A278-B61F356EAB45`. Category buttons are scoped to
+layout object 276 and matched by their category names, independently of order.
+No generated element ID or assignment example is used as a data source.
+
+The updated CLI completed a fresh headless live run with exit code 0 and saved
+evidence under `artifacts/20261024T224455Z_73e955f6/`. It verified M12205 and
+captured the following historical result:
+
+- Title: Halifax Regional Water Commission - Windsor Street Exchange
+  Redevelopment Project - $69,275,000.
+- Status: Closed; type: Capital Expenditure Approvals; category: Water.
+- Date received: `04/07/2025`; decision date: `10/23/2025`; outcome: Directions given.
+- Exhibits: 13; Key Documents: 6; Other Documents: 43; Transcripts: 0; Recordings: 0.
+- Total across the five document categories: **62**.
+
+Every structured value was compared with saved page text, and the screenshot
+was reviewed. There were no blocked origins, failed requests, or capture errors.
+The report records `metadata_counts_complete: true`; the broader
+`phase1_milestone_complete` remains false until a real download is validated.
+
+Extraction waits for the nonempty title and valid category-count labels using
+bounded Playwright assertions. Blank optional metadata is recorded as null;
+missing or ambiguous widgets fail. Counts must be nonnegative ASCII integers.
+All five must validate before the counts and total are published. A failure
+retains the verified matter identifier and any completed metadata, along with
+the original error, extraction stage, and browser evidence.
+
+Offline fixtures delay metadata and counts beyond identifier arrival, vary
+category order, and include an unrelated category button outside the detail
+area. Coverage includes blank optional values, explicit zero counts, missing
+or ambiguous widgets, invalid/negative counts, and extraction timeouts.
+The final complete offline suite passed **64 tests** in the project's Python 3.12
+environment. An earlier run had one Playwright trace-export error; that case
+passed individually, and the subsequent full suite passed without source changes
+during execution. No automatic application retry was introduced.
+
 ## Remaining website behavior
 
-Metadata field associations, extraction of all five independent category counts,
-category tab behavior, and Go Get It download/popup behavior remain unimplemented.
-The next milestone extracts metadata/counts, then persists and validates one real
-download. Pagination and all-category support follow the one-file path. ZIP
-creation and email integration remain deferred.
+Category tab behavior and Go Get It download/popup behavior remain unimplemented.
+The next milestone persists and validates one real download. Pagination and
+all-category support follow the one-file path. ZIP creation and email integration
+remain deferred.

@@ -63,13 +63,24 @@ def offline_site(monkeypatch):
 
 
 @pytest.mark.parametrize(('mode', 'stage', 'error'), [
-    ('success', 'verify_matter', None),
+    ('success', 'extract_category_counts', None),
+    ('blank_optional', 'extract_category_counts', None),
+    ('all_zero', 'extract_category_counts', None),
     ('ambiguous_search', 'submit_matter_search', 'strict mode violation'),
     ('not_found', 'verify_matter', 'not found: No Records Found'),
     ('mismatch', 'verify_matter', 'identifier mismatch'),
     ('timeout', 'verify_matter', 'Timeout'),
     ('missing_field', 'locate_matter_field', 'Timeout'),
     ('inactive_editor', 'locate_matter_field', 'Timeout'),
+    ('missing_metadata', 'extract_metadata', 'Timeout'),
+    ('ambiguous_metadata', 'extract_metadata', 'strict mode violation'),
+    ('missing_title', 'extract_metadata', 'Matter title must be nonempty'),
+    ('metadata_timeout', 'extract_metadata', 'Matter title must be nonempty'),
+    ('missing_count', 'extract_category_counts', 'Invalid or unavailable count for Other Documents'),
+    ('ambiguous_count', 'extract_category_counts', 'strict mode violation'),
+    ('malformed_count', 'extract_category_counts', 'Invalid or unavailable count for Other Documents'),
+    ('negative_count', 'extract_category_counts', 'Invalid or unavailable count for Other Documents'),
+    ('count_timeout', 'extract_category_counts', 'Invalid or unavailable count for Other Documents'),
 ])
 def test_offline_search_and_failure_evidence(mode, stage, error, offline_site, tmp_path):
     offline_site(mode)
@@ -87,9 +98,29 @@ def test_offline_search_and_failure_evidence(mode, stage, error, offline_site, t
         assert report['status'] == 'matter_found'
         assert report['observed_matter_number'] == report['verified_matter_number'] == 'M12205'
         assert 'Back to Search Results' in (directory / 'page.txt').read_text()
+        assert report['metadata_counts_complete'] is True
+        expected_metadata = {
+            'matter_number': 'M12205', 'title': 'Fixture water project',
+            'status': 'Open', 'type': 'Capital Expenditure Approvals', 'category': 'Water',
+            'date_received': '01/02/2026', 'decision_date': '03/04/2026', 'outcome': 'Fixture outcome',
+        }
+        if mode == 'blank_optional':
+            for name in ('status', 'type', 'category', 'date_received', 'decision_date', 'outcome'):
+                expected_metadata[name] = None
+        assert report['matter_metadata'] == expected_metadata
+        expected_counts = {'Exhibits': 2, 'Key Documents': 4, 'Other Documents': 7, 'Transcripts': 0, 'Recordings': 0}
+        if mode == 'all_zero':
+            expected_counts = dict.fromkeys(expected_counts, 0)
+        assert report['category_counts'] == expected_counts
+        assert report['total_document_count'] == sum(expected_counts.values())
     else:
         assert report['status'] == 'failed'
-        assert report['verified_matter_number'] is None
+        assert report['verified_matter_number'] == ('M12205' if stage.startswith('extract_') else None)
+        assert report['metadata_counts_complete'] is False
+        assert report['category_counts'] == {}
+        assert report['total_document_count'] is None
+        if stage == 'extract_category_counts':
+            assert report['matter_metadata']['title'] == 'Fixture water project'
         assert error in report['error']['message']
         if mode == 'mismatch':
             assert report['observed_matter_number'] == 'M54321'
@@ -102,4 +133,7 @@ def test_offline_inspection_does_not_search(offline_site, tmp_path):
     assert report['stage'] == 'inspect_dom'
     assert report['intended_request'] == {'matter_number': None}
     assert report['verified_matter_number'] is None
+    assert report['metadata_counts_complete'] is False
+    assert report['matter_metadata'] == report['category_counts'] == {}
+    assert report['total_document_count'] is None
     assert 'Go Directly to Matter' in (directory / 'page.txt').read_text()

@@ -1,9 +1,11 @@
 <!doctype html>
 <meta charset="utf-8">
 <title>Offline FileMaker matter interaction</title>
+<style>.text { min-height: 20px; }</style>
 <!-- Reduced from observation-6: layout-object classes persist across sessions;
      generated element IDs and unrelated layout/style markup are omitted. -->
 <button>Search</button>
+<button>Other Documents - 999</button>
 <div class="iwps_body">
   <div>Go Directly to Matter</div>
   <div class="fm-textarea fm_object_254">
@@ -44,10 +46,42 @@ document.querySelector('.fm_object_258 button').addEventListener('click', () => 
   }
   // The detail layout arrives before its data, as on the live site.
   body.innerHTML = '<div><span>Matter No<br>Status</span></div><button>Back to Search Results</button>' +
-    '<div class="fm-textarea fm_object_286 v-readonly"><div class="inner_border"><div class="text" tabindex="-1"></div></div></div>';
+    '<div class="fm-textarea fm_object_286 v-readonly"><div class="inner_border"><div class="text" tabindex="-1"></div></div></div>' +
+    '<div class="iwps_text_box csFM-4BAC3292-04BC-FC44-A278-B61F356EAB45"><div class="text"></div></div>' +
+    [289, 287, 298, 292, 294, 295].map(id =>
+      `<div class="fm-textarea fm_object_${id} v-readonly"><div class="text"></div></div>`).join('') +
+    '<div class="fm_object_276">' +
+    ['Recordings', 'Other Documents', 'Exhibits', 'Transcripts', 'Key Documents'].map(name =>
+      `<button>${name} - </button>`).join('') + '</div>';
   setTimeout(() => {
     body.querySelector('.fm_object_286 .text').textContent =
       mode === 'mismatch' ? 'M54321\n' : 'M12205\n';
   }, 30);
+  // Metadata and counts arrive after the identifier, so search success is insufficient.
+  setTimeout(() => {
+    const title = body.querySelector('.csFM-4BAC3292-04BC-FC44-A278-B61F356EAB45');
+    if (mode !== 'metadata_timeout') title.querySelector('.text').textContent = 'Fixture water project';
+    for (const [id, value] of Object.entries({
+      289: 'Open', 287: 'Capital Expenditure Approvals', 298: 'Water',
+      292: '01/02/2026', 294: '03/04/2026', 295: 'Fixture outcome',
+    })) body.querySelector(`.fm_object_${id} .text`).textContent = mode === 'blank_optional' ? '  ' : value;
+    if (mode === 'missing_metadata') body.querySelector('.fm_object_292').remove();
+    if (mode === 'ambiguous_metadata') body.append(body.querySelector('.fm_object_289').cloneNode(true));
+    if (mode === 'missing_title') title.remove();
+  }, 100);
+  setTimeout(() => {
+    const counts = {Exhibits: 2, 'Key Documents': 4, 'Other Documents': 7, Transcripts: 0, Recordings: 0};
+    const buttons = body.querySelectorAll('.fm_object_276 button');
+    for (const button of buttons) {
+      const name = button.textContent.split(' - ')[0];
+      button.textContent = `${name} - ${mode === 'all_zero' ? 0 : counts[name]}`;
+    }
+    const other = [...buttons].find(button => button.textContent.startsWith('Other Documents'));
+    if (mode === 'missing_count') other.remove();
+    if (mode === 'ambiguous_count') other.parentElement.append(other.cloneNode(true));
+    if (mode === 'malformed_count') other.textContent = 'Other Documents - many';
+    if (mode === 'negative_count') other.textContent = 'Other Documents - -1';
+    if (mode === 'count_timeout') other.textContent = 'Other Documents - ';
+  }, 160);
 });
 </script>
