@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "senpilot-regulatory-agent"
+version = "0.1.0"
+description = "Regulatory document retrieval, starting with a live UARB browser probe"
+requires-python = ">=3.12"
+dependencies = ["playwright>=1.50,<2"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10"]
+
+[project.scripts]
+senpilot-probe = "senpilot_agent.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/senpilot_agent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

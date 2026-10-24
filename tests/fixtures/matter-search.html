@@ -1,0 +1,53 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Offline FileMaker matter interaction</title>
+<!-- Reduced from observation-6: layout-object classes persist across sessions;
+     generated element IDs and unrelated layout/style markup are omitted. -->
+<button>Search</button>
+<div class="iwps_body">
+  <div>Go Directly to Matter</div>
+  <div class="fm-textarea fm_object_254">
+    <div class="inner_border">
+      <div class="text" tabindex="0" style="min-height: 25px; width: 280px"></div>
+      <div class="placeholder">eg M01234</div>
+    </div>
+  </div>
+  <div class="fm_object_258"><button>Search</button></div>
+  <button>Search</button>
+</div>
+<script>
+const mode = '__MODE__';
+const body = document.querySelector('.iwps_body');
+const field = document.querySelector('.fm_object_254 .text');
+let committed = '';
+field.addEventListener('click', () => {
+  if (mode !== 'inactive_editor') {
+    setTimeout(() => { field.contentEditable = 'true'; field.focus(); }, 20);
+  }
+});
+field.addEventListener('keydown', event => {
+  if (event.key === 'Tab') committed = field.innerText.trim();
+});
+if (mode === 'missing_field') document.querySelector('.fm_object_254').remove();
+if (mode === 'ambiguous_search') {
+  document.querySelector('.fm_object_258').append(document.createElement('button'));
+  document.querySelector('.fm_object_258 button:last-child').textContent = 'Search';
+}
+document.querySelector('.fm_object_258 button').addEventListener('click', () => {
+  if (mode === 'timeout') return; // Submitted input alone must never prove success.
+  if (mode === 'not_found' || committed !== 'M12205') {
+    const dialog = document.createElement('div');
+    dialog.innerHTML = '<div>No Records Found</div>' +
+      '<div>No records matched your search request. Click OK to return to Search page.</div><button>OK</button>';
+    document.body.append(dialog);
+    return;
+  }
+  // The detail layout arrives before its data, as on the live site.
+  body.innerHTML = '<div><span>Matter No<br>Status</span></div><button>Back to Search Results</button>' +
+    '<div class="fm-textarea fm_object_286 v-readonly"><div class="inner_border"><div class="text" tabindex="-1"></div></div></div>';
+  setTimeout(() => {
+    body.querySelector('.fm_object_286 .text').textContent =
+      mode === 'mismatch' ? 'M54321\n' : 'M12205\n';
+  }, 30);
+});
+</script>
