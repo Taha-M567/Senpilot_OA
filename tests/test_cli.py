@@ -146,3 +146,39 @@ def test_collection_cli_rejects_conflicting_modes(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as error:
         cli.main()
     assert error.value.code == 2
+
+
+@pytest.mark.parametrize('contents',['{}','{"subject":"a","body_text":null}',
+    '{"subject":"a","body_text":"M12205","thread_id":"x"}',
+    '{"subject":"a","subject":"b","body_text":"M12205"}'])
+def test_invalid_email_file_fails_before_workflow(contents,tmp_path,monkeypatch):
+    path=tmp_path/'email.json';path.write_text(contents)
+    monkeypatch.setattr(sys,'argv',['senpilot-probe','--email-request',str(path)])
+    monkeypatch.setattr(cli,'inspect_site',lambda *a,**k:pytest.fail('Invalid email launched workflow'))
+    with pytest.raises(SystemExit) as exc: cli.main()
+    assert exc.value.code==2
+
+
+@pytest.mark.parametrize('args',[['--dry-run'],['--matter','M12205','--email-request','unused'],
+    ['--collection-request','unused','--email-request','unused'],['--email-request','unused','--download-one']])
+def test_email_cli_rejects_conflicting_or_missing_modes(monkeypatch,args):
+    monkeypatch.setattr(sys,'argv',['senpilot-probe',*args])
+    with pytest.raises(SystemExit) as exc: cli.main()
+    assert exc.value.code==2
+
+
+@pytest.mark.parametrize('status,exit_code',[('selection_ready',0),('collection_complete',0),
+    ('no_matches',1),('insufficient_detail',1),('ranking_failed',1),('ranking_capacity_exceeded',1)])
+def test_email_cli_passes_text_and_reports_terminal_outcomes(tmp_path,monkeypatch,capsys,status,exit_code):
+    path=tmp_path/'email.json';path.write_text('{"subject":"M12205","body_text":"Only Board Orders"}')
+    async def inspect(output,**kwargs):
+        assert kwargs['email_request'].body_text=='Only Board Orders'
+        assert kwargs['dry_run'] is True
+        return tmp_path,{'status':status,'stage':'rank_documents',
+            'selection_message':'Submit a new request.' if status=='insufficient_detail' else None,
+            'error':{'message':'Synthetic failure'} if status in {'ranking_failed','ranking_capacity_exceeded'} else {}}
+    monkeypatch.setattr(cli,'inspect_site',inspect)
+    monkeypatch.setattr(sys,'argv',['senpilot-probe','--email-request',str(path),'--dry-run'])
+    assert cli.main()==exit_code
+    output=capsys.readouterr().out
+    assert output.count('Submit a new request.') <= 1

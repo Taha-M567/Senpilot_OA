@@ -1,9 +1,12 @@
 # Senpilot Regulatory Document AI Agent
 
-The collection stage accepts **supplied document priorities**, downloads up to
-**10 selected documents**, and creates a verified **delivery ZIP** with a
-manifest. Live matter verification, metadata, and all five category counts are
-retained. Email interpretation, LLM ranking, and email intake/delivery are deferred.
+The agent accepts a local JSON file containing **email subject/body text**,
+verifies its matter, catalogs the five document categories, and makes one logical
+LLM request to select up to **10 documents**. It downloads those selections and
+creates a verified **delivery ZIP** with metadata/counts and a manifest. Explicit
+document-priority JSON and ordinary inspection commands also remain available.
+Mailbox intake and email delivery are still deferred. Real-provider selection
+quality and API access remain to be verified once credentials are configured.
 
 Values in the assignment PDF are examples, never application defaults. The
 command has no default matter number and downloads only when explicitly asked.
@@ -18,7 +21,11 @@ src/senpilot_agent/
   retrieval.py # Category navigation, virtual scrolling, download by reference
   archive.py   # Delivery ZIP, manifest, CRC and checksum verification
   files.py     # Safe filenames, basic PDF/ZIP/MP3 checks, SHA-256
+  selection.py # Email-text contract, regex matter gate, final reference checks
+  catalog.py   # Complete virtual-list snapshots, eligibility and fingerprints
+  llm.py       # Responses schema/prompt, capacity check, bounded provider retry
 tests/         # Offline tests; no requests to the public site
+scripts/       # Opt-in labelled model evaluation
 docs/          # Assignment and investigation notes
 artifacts/     # Ignored local reports, DOM, screenshots, traces
 ```
@@ -27,6 +34,7 @@ Python **3.12+** and Playwright are the runtime requirements. Playwright operate
 the browser deterministically; pytest is the only development dependency. The
 helpers use the Python standard library. No LLM, email SDK, agent framework,
 database, or ZIP dependency is required for downloading and packaging.
+The optional `llm` extra adds the official OpenAI SDK for email-text ranking.
 
 ## Setup on this Windows machine
 
@@ -57,6 +65,121 @@ Without an editable package installation, run from source:
 $env:PYTHONPATH = "$PWD\src"
 .\.venv\Scripts\python.exe -m senpilot_agent.cli --headed
 ```
+
+## Rank an email-text request and create its ZIP
+
+Install the optional adapter and configure the current PowerShell process:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install --cache-dir .cache/pip -e ".[dev,llm]"
+$env:PLAYWRIGHT_BROWSERS_PATH = "$PWD\.cache\ms-playwright"
+$env:OPENAI_API_KEY = '<your-api-key>'
+$env:SENPILOT_LLM_MODEL = 'gpt-6-luna'
+
+.\.venv\Scripts\senpilot-probe.exe --email-request examples/email-request.json
+# Development option: makes the ranking call and saves the selection, without downloads.
+.\.venv\Scripts\senpilot-probe.exe --email-request examples/email-request.json --dry-run
+```
+
+`gpt-6-luna` is an initial configurable candidate supporting Responses and
+Structured Outputs according to the [official model documentation](https://developers.openai.com/api/docs/models/gpt-6-luna).
+Its relevance on these requests is not yet established by live evaluations;
+account access must also be confirmed. Choose another schema-capable model through
+the same environment variable if required. [.env.example](.env.example) lists
+configuration variables as a reference; the application does not load that file.
+
+The input contains only `subject` and `body_text`, for example:
+
+```json
+{
+  "subject": "Orders and compliance filings for M12205",
+  "body_text": "Send up to 3 documents. Prioritize Board Orders, then compliance filings. Exclude confidentiality undertakings and hearing orders."
+}
+```
+
+Python extracts one distinct complete matter token before browser/model work.
+Repeated references to that matter are allowed. Missing, partial, or multiple
+distinct matters end as `invalid_request`, with no browser launch or model call.
+No category router or intermediate model intent-extraction step is required.
+
+The browser catalogs every listed row across all five categories. It checks
+contiguous row coverage and repeatable metadata in two passes, then re-queries
+the matter-detail page to confirm the counts. This extra check avoids document
+layouts that leave another category's button count blank. Cataloging is bounded
+to five minutes overall. Private, malformed, or ambiguously addressable rows are
+preserved in evidence but excluded from model input. Cross-category listings of
+the same native reference cannot become duplicate downloads.
+
+The model receives all eligible candidates with category, reference, title or
+witnesses, and displayed dates/extensions where available. Dates retain their
+site meaning; they are not assumed file creation dates. No file contents are
+downloaded for ranking. Explicit scope, exclusions, quantities, and priorities
+override defaults. Generic requests favor a complementary written overview:
+decisions/orders, application, substantive evidence, then compliance material,
+ahead of routine correspondence. Recency breaks ties; there are no category
+quotas. Transcripts and recordings require explicit or clearly implied intent.
+
+The adapter uses [Responses Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs).
+One logical ranking request normally means one attempt; temporary connection,
+timeout, rate-limit, or server failures permit one identical retry after one
+second. SDK automatic retries are disabled. Each attempt has a whole-request
+deadline, default 60 seconds. Exhausted quota, invalid credentials/requests,
+refusals, incomplete responses, and invalid selections do not get repair calls.
+A retry after a timeout can incur a second provider charge.
+
+Python checks the final schema, matter, candidate membership/eligibility,
+canonical uniqueness, metadata evidence, scope consistency, and hard cap of ten.
+It preserves model order and reuses the existing downloader. These checks cannot
+prove correct interpretation of English preferences; labelled evaluations assess
+that separately. Failed selections are not replaced or reranked.
+
+Capacity is checked against the entire serialized request. To avoid another
+API call or tokenizer dependency, `UTF-8 bytes + 4096` supplies a conservative
+input-token upper bound, including schema/instructions and framing headroom.
+This is intentionally larger than an exact token count. The default input budget
+is 96,000, configured context allowance 128,000, and output allowance 4,096.
+`SENPILOT_INPUT_BUDGET`, `SENPILOT_CONTEXT_TOKENS`, `SENPILOT_MAX_OUTPUT_TOKENS`,
+and `SENPILOT_MODEL_TIMEOUT` override these settings. Confirm the chosen model
+supports the configured context allowance; input plus output must fit it. An
+oversized request ends as `ranking_capacity_exceeded` before generation; there is
+no first-X, newest-X, per-category truncation, or second-model summarization.
+
+Each job records `request.json`, `catalog.json`, `ranking-input.json`,
+`model-response.json`, `selection.json`, and an executable
+`collection-request.json` when accepted, alongside the existing browser evidence
+and `report.json`. Early failures produce only applicable evidence. Audit records
+include prompt/schema versions, catalog fingerprint, input sizing, per-attempt
+outcomes, and provider usage/latency when available. Raw email, model audit, and
+browser/session evidence stay outside the delivery ZIP. API keys are not saved.
+
+`selection_ready` with exit 0 means dry-run selection succeeded. Terminal outcomes
+such as `invalid_request`, `configuration_error`, `catalog_incomplete`,
+`ranking_capacity_exceeded`, `ranking_failed`, `model_refused`, `invalid_selection`,
+`insufficient_detail`, and `no_matches` exit 1 without starting downloads. There
+are no pending conversations, reply-thread matching, or follow-up model turns;
+every later submission starts a new job.
+Insufficient-detail notices use a fixed final instruction to submit a new request;
+the model's original explanation is retained only in the selection audit.
+
+Validate the 13 synthetic labelled fixtures without contacting a provider, then
+opt in to paid evaluations when credentials are ready:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/evaluate_selection.py
+.\.venv\Scripts\python.exe scripts/evaluate_selection.py --live --case generic_overview
+# Runs one independent ranking job per case; each permits at most one transient retry.
+.\.venv\Scripts\python.exe scripts/evaluate_selection.py --live
+```
+
+Results under ignored `artifacts/selection-evals-*/` judge required/excluded
+matches, quantities, and preference tiers, allowing equivalent orderings.
+Checking fixture structure or SDK mocks does not measure live model quality.
+For the real-provider browser/download acceptance check, use
+`--email-request examples/email-offscreen-request.json` and inspect the saved
+catalog and reasons. In the observed M12205 snapshot, the original Hearing Order
+is beyond the first viewport, so prioritizing it tests selection beyond initial
+rows. References, positions, and availability must be verified from that run;
+the example is not a fallback to historical results.
 
 ## Download and ZIP supplied priorities
 
@@ -131,7 +254,7 @@ metadata/counts plus one validated file milestone.
 
 See the [download and ZIP plan](docs/download-and-zip-plan.md). The earlier
 [email-guided selection proposal](docs/document-selection-plan.md) is historical.
-The [single-call LLM plan](docs/single-call-llm-plan.md) defines the next stage:
+The [single-call LLM plan](docs/single-call-llm-plan.md) defines the selection stage:
 a regex first requires one valid matter number; metadata across that matter's
 five categories and the email text then enter one model call. The model infers
 category intent and ranks real references for this collector. The complete
@@ -142,8 +265,9 @@ require explicit or clearly implied intent. The logical ranking call allows at
 most one retry for a transient provider failure, with no repair/reranking call.
 Each submission is an independent job, with no clarification conversation or
 email-thread matching.
-Email interpretation/ranking remain unimplemented; mailbox intake and delivery
-are left until last.
+Mailbox intake and delivery are left until last. See
+[selection investigation](docs/selection-investigation.md) for verification and
+the remaining real-provider acceptance checks.
 
 ## Searching and reading the evidence
 
@@ -248,13 +372,15 @@ the wait for file persistence. `--inspect-seconds` adds an optional debugging
 pause **after** the requested workflow succeeds; it is not an application
 readiness condition.
 
-Only HTTPS/WSS on `uarb.novascotia.ca:443` is permitted. Other origins are blocked
+Browser traffic permits only HTTPS/WSS on `uarb.novascotia.ca:443`. Other origins are blocked
 and recorded. If live inspection establishes a required resource host, review it
 and add that exact host deliberately. Do not disable TLS verification to bypass
 a browser certificate error. Artifacts can contain session identifiers and are
 excluded from Git. Chromium can report `net::ERR_ABORTED` when a navigation
 becomes an attachment; this raw diagnostic is retained in `failed_requests` even
 when saving and validation succeed.
+The separate optional server-side SDK sends the request text and eligible public
+catalog to OpenAI; the browser's UARB origin restriction is retained.
 
 ## Confirmed results and remaining work
 
@@ -286,6 +412,14 @@ Install Chromium as above before running the complete suite.
 The earlier one-file milestone passed **81 tests on Python 3.14.2**; the collection
 stage adds request, virtual-list retrieval, recovery, and ZIP integrity tests.
 The complete collection-stage suite passed **154 tests on Python 3.14.2**.
+The selection implementation passed a **246-test full regression** followed by
+**58 targeted checks** after final buffer-row and terminal-message hardening,
+including one additional browser regression. Real UARB catalog snapshots and a
+two-document ZIP with a simulated provider response also passed; real-provider
+ranking/evaluations are still pending credentials. See
+[selection investigation](docs/selection-investigation.md) for the distinction.
+A final 62-test adapter/contract check also passed; all 248 currently collected
+cases have passing evidence across these runs.
 If Windows denies access to a temp directory from an earlier sandbox session,
 use `--basetemp artifacts/pytest-local -o cache_dir=artifacts/pytest-cache`.
 
@@ -293,7 +427,8 @@ The existing validator rejects empty files, HTML error responses, basic malforme
 PDFs, corrupt ZIP containers, and MP3 files without a plausible complete first
 MPEG Layer III frame, and calculates SHA-256. PDF markers and MP3 headers are
 basic checks, not full parsing/decoding. Unknown formats are explicitly reported
-as unvalidated and excluded from delivery. Email functionality remains pending.
+as unvalidated and excluded from delivery. Mailbox intake and outbound email
+delivery remain pending.
 
 Official references: [Playwright installation](https://playwright.dev/python/docs/intro),
 [download events and persistence](https://playwright.dev/python/docs/downloads),

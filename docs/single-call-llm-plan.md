@@ -1,6 +1,8 @@
 # Plan: rank requested UARB documents with one LLM call
 
-Status: proposed; this document does not implement or invoke an LLM.
+Status: implementation added; real-provider acceptance/evaluations remain pending
+the user's deferred API-key configuration. This document records the agreed
+architecture and completion gates. See `selection-investigation.md` for evidence.
 Starting point: `2f490a5`, with verified priority-driven downloads and ZIP creation.
 This decision supersedes the separate intent-extraction/ranking workflow in
 `document-selection-plan.md`. Email intake and delivery remain last.
@@ -151,6 +153,11 @@ inspection/download commands usable without it, and preserve lazy imports.
 Use a server-side API key from configuration, an explicit request timeout, and
 bounded output. Do not introduce an agent framework, embeddings store, or database.
 
+The implementation keeps the model explicit in `SENPILOT_LLM_MODEL`. The README
+uses `gpt-6-luna` as an initial candidate: its official model page lists Responses
+and Structured Outputs support. Its account access and request-selection quality
+still require live evaluation; no automatic model fallback is configured.
+
 The adapter may retry once after a short bounded delay for a temporary connection
 failure, timeout, retryable rate limit, or temporary server error. Distinguish a
 retryable rate limit from an exhausted quota. Invalid credentials, malformed API
@@ -234,6 +241,10 @@ explicitly and reject additional fields. For `ready`, require a nonempty ranking
 and a null message; non-ready statuses require a final explanatory message and
 must not contain downloadable selections. An insufficient-detail message says
 to submit a new request from scratch; it is not a clarification question.
+The user-facing insufficient-detail notice uses a fixed application template
+closing the request and directing a new submission; retain the original model
+message in audit evidence, so even a question-shaped model message cannot start
+a conversation in the execution flow.
 
 The model outputs candidate IDs rather than constructing filenames, URLs, or
 UARB identifiers. Ordered results become priorities 1, 2, 3, and so on; Python
@@ -256,6 +267,15 @@ each category. All eligible candidates must reach the model or the job ends befo
 generation. Catalog input capacity and the global maximum of 10 output selections
 are separate limits. Any future shortlisting policy requires a separate design
 decision acknowledging that omitted candidates can never be selected.
+
+Implementation sizing uses the serialized request's UTF-8 byte length plus 4096
+framing tokens as a conservative token upper bound, without a tokenizer or extra
+provider call. Defaults are 96,000 input, 128,000 configured context allowance,
+and 4096 maximum output tokens; input plus output must fit the configured context.
+This intentionally overestimates ordinary text tokens. Save the bound and method
+separately from actual provider usage. The live catalog observations of 62 and
+331 listed rows fit this budget; neither establishes a maximum supported document
+count, which also depends on metadata lengths and the original request.
 
 ## 5. Perform one final execution-boundary check
 
@@ -300,6 +320,13 @@ rank replacements or silently substitute unselected documents.
 | 4. Connect local CLI execution | Add an LLM request-file mode that executes a valid ready selection automatically; optional dry-run output supports development |
 | 5. Verify model selection quality | Offline integration tests and a small labelled request/catalog evaluation set; opt-in live catalog/model/download acceptance |
 | 6. Document operation | README setup/configuration, sample request, saved evidence, optional dependency instructions; email intake/delivery still deferred |
+
+Implemented entry points: `--email-request` and optional `--dry-run`; contracts
+in `selection.py`, enumeration in `catalog.py`, adapter/schema/prompt in `llm.py`,
+and orchestration in `probe.py`. The optional dependency is the official OpenAI
+SDK. The labelled fixture set and opt-in evaluation command are checked in;
+live-provider gates below remain explicitly outstanding until credentials are
+configured. Email adapters and conversation state were not introduced.
 
 Optional dry-run output makes the exact generated collection request reviewable
 without downloading files; it is not a mandatory approval step. Mail integration

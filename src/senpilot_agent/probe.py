@@ -11,6 +11,9 @@ from uuid import uuid4
 from .archive import create_delivery_archive
 from .collection import CollectionRequest
 from .retrieval import collect_documents, download_row
+from .catalog import build_catalog
+from .llm import LLMConfig, rank_documents
+from .selection import EmailRequest, RequestFailure, extract_matter_number, validate_selection
 
 
 UARB_URL = "https://uarb.novascotia.ca/fmi/webd/UARB15"
@@ -37,6 +40,9 @@ async def inspect_site(
     matter_number: str | None = None,
     download_one: bool = False,
     collection_request: CollectionRequest | None = None,
+    email_request: EmailRequest | None = None,
+    llm_config: LLMConfig | None = None,
+    dry_run: bool = False,
 ) -> tuple[Path, dict]:
     """Capture live DOM and controls, or a truthful failure report.
 
@@ -75,6 +81,20 @@ async def inspect_site(
     tracing_started = False
     try:
         report["stage"] = "validate_request"
+        if dry_run and email_request is None:
+            raise ValueError("dry_run requires an email-text request")
+        if email_request is not None:
+            if (not isinstance(email_request, EmailRequest) or matter_number is not None
+                    or collection_request is not None or download_one):
+                raise ValueError("Conflicting or invalid email-text request")
+            matter_number = extract_matter_number(email_request.subject, email_request.body_text)
+            report["intended_request"] = {"matter_number": matter_number}
+            report["purpose"] = "Rank email-requested documents and create a delivery ZIP"
+            (run_dir / "request.json").write_text(json.dumps({
+                "subject": email_request.subject, "body_text": email_request.body_text,
+            }, indent=2, ensure_ascii=False), encoding="utf-8")
+            report["stage"] = "configure_model"
+            llm_config = llm_config or LLMConfig.from_env()
         if collection_request is not None:
             if not isinstance(collection_request, CollectionRequest):
                 raise ValueError("collection_request must be a validated CollectionRequest")
@@ -154,9 +174,40 @@ async def inspect_site(
                 if matter_number is not None:
                     detail = await _search_matter(page, matter_number, report)
                     await _extract_matter_details(detail, report, timeout_ms)
+                    if email_request is not None:
+                        report["stage"] = "catalog_documents"
+                        catalog = await build_catalog(page, report, timeout_ms)
+                        (run_dir / "catalog.json").write_text(json.dumps(catalog, indent=2, ensure_ascii=False), encoding="utf-8")
+                        report["catalog"] = {k: v for k, v in catalog.items() if k != "documents"}
+                        report["stage"] = "rank_documents"
+                        selection = await rank_documents(email_request, catalog, llm_config, run_dir, report)
+                        (run_dir / "selection.json").write_text(json.dumps(selection, indent=2, ensure_ascii=False), encoding="utf-8")
+                        report["stage"] = "validate_selection"
+                        try:
+                            collection_request = validate_selection(selection, catalog)
+                        except (TypeError, ValueError, KeyError) as exc:
+                            raise RequestFailure("invalid_selection", str(exc)) from exc
+                        report["selection_outcome"] = selection["status"]
+                        report["selection_message"] = (
+                            "This request ended because more detail is needed. Submit a new detailed request from scratch."
+                            if selection["status"] == "insufficient_detail" else selection["message"]
+                        )
+                        if collection_request is None:
+                            report["status"] = selection["status"]
+                        else:
+                            report["collection_request"] = {
+                                "matter_number": collection_request.matter_number,
+                                "limit": collection_request.limit,
+                                "documents": [d.to_dict() for d in collection_request.documents],
+                            }
+                            (run_dir / "collection-request.json").write_text(json.dumps(report["collection_request"], indent=2), encoding="utf-8")
+                            if dry_run:
+                                report["status"] = "selection_ready"
+                            else:
+                                report["selected_documents"] = [d.to_dict() for d in collection_request.selected()]
                     if download_one:
                         await _download_one_other_document(page, detail, report, run_dir, timeout_ms)
-                    elif collection_request is not None:
+                    elif collection_request is not None and not dry_run:
                         await collect_documents(page, collection_request, report, run_dir, timeout_ms, allowed_url)
                 if inspect_seconds:
                     # Explicit human inspection window, not a readiness heuristic.
@@ -180,11 +231,12 @@ async def inspect_site(
                         await frame.content(), encoding="utf-8",
                     )
                     report["frames"].append({"index": index, "controls": controls})
-                report["status"] = (
-                    "collection_pending_archive" if collection_request is not None else
-                    "document_downloaded" if download_one else
-                    "matter_found" if matter_number is not None else "inspection_captured"
-                )
+                if email_request is None or (collection_request is not None and not dry_run):
+                    report["status"] = (
+                        "collection_pending_archive" if collection_request is not None else
+                        "document_downloaded" if download_one else
+                        "matter_found" if matter_number is not None else "inspection_captured"
+                    )
                 if matter_number is None:
                     report["stage"] = "inspect_dom"
             finally:
@@ -209,7 +261,7 @@ async def inspect_site(
                     except Exception as exc:
                         report["capture_errors"].append(str(exc))
     except Exception as exc:
-        report["status"] = "failed"
+        report["status"] = exc.status if isinstance(exc, RequestFailure) else "failed"
         report["error"] = {"type": type(exc).__name__, "message": str(exc)}
     finally:
         if isinstance(collection_request, CollectionRequest) and "selected_documents" in report:

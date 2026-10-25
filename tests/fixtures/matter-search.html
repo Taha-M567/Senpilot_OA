@@ -20,8 +20,11 @@
 <script>
 const mode = '__MODE__';
 const body = document.querySelector('.iwps_body');
+const searchNodes = [...body.childNodes];
+if (mode.startsWith('collection_')) document.querySelector('body > button').onclick = () => body.replaceChildren(...searchNodes);
 const field = document.querySelector('.fm_object_254 .text');
 let committed = '';
+let searchVisits = 0;
 field.addEventListener('click', () => {
   if (mode !== 'inactive_editor') {
     setTimeout(() => { field.contentEditable = 'true'; field.focus(); }, 20);
@@ -36,6 +39,7 @@ if (mode === 'ambiguous_search') {
   document.querySelector('.fm_object_258 button:last-child').textContent = 'Search';
 }
 document.querySelector('.fm_object_258 button').addEventListener('click', () => {
+  searchVisits++;
   if (mode === 'timeout') return; // Submitted input alone must never prove success.
   if (mode === 'not_found' || committed !== 'M12205') {
     const dialog = document.createElement('div');
@@ -133,7 +137,8 @@ function prepareDownload() {
 
 function collectionCounts() {
   const dates = mode.startsWith('collection_dates');
-  return {Exhibits: 2, 'Key Documents': 3, 'Other Documents': 25, Transcripts: dates ? 2 : 0, Recordings: dates ? 2 : 0};
+  if (mode === 'collection_all_zero') return {Exhibits:0,'Key Documents':0,'Other Documents':0,Transcripts:0,Recordings:0};
+  return {Exhibits: 2, 'Key Documents': 3, 'Other Documents': mode === 'collection_catalog_count_changes' && searchVisits>1 ? 26 : 25, Transcripts: dates ? 2 : 0, Recordings: dates ? 2 : 0};
 }
 
 function showCollection(category) {
@@ -150,7 +155,9 @@ function showCollection(category) {
       '<div style="position:relative;overflow:hidden;height:204px;width:630px"><table role="grid"><tbody class="v-grid-body" style="display:block"></tbody></table></div></div>';
     const scroll = body.querySelector('.v-grid-scroller-vertical');
     const tbody = body.querySelector('tbody');
+    let catalogEpoch = 0;
     const render = () => {
+      if (scroll.scrollTop === 0) catalogEpoch++;
       const first = Math.max(0, Math.floor(scroll.scrollTop/68) - 1);
       tbody.style.transform = `translateY(${-scroll.scrollTop}px)`;
       tbody.innerHTML = Array.from({length:Math.min(5,count-first)},(_,i) => {
@@ -162,16 +169,31 @@ function showCollection(category) {
         const shown = mode === 'collection_ambiguous' && i === 1 ?
           String((category === 'Key Documents' ? 200001 : 100001)+first) : number;
         const security = mode === 'collection_private' && number === '100002' ? 'Confidential' : 'Public';
+        if (mode === 'collection_catalog_gap' && category === 'Other Documents' && index === 10) return '';
         return `<tr role="row" class="v-grid-row v-grid-row-has-data" style="position:absolute;display:block;transform:translateY(${index*68}px);height:68px;width:620px"><td role="gridcell" style="display:block">
           <span class="fm_object_${idClass}"><span class="text">${shown}</span></span>
-          <span class="fm_object_202"><span class="text">${category === 'Transcripts' ? 'Witness '+index : category === 'Recordings' ? 'Day '+(index+1) : 'Fixture document '+number}</span></span>
+          <span class="fm_object_202"><span class="text">${category === 'Transcripts' ? 'Witness '+index : category === 'Recordings' ? 'Day '+(index+1) : 'Fixture document '+number}${mode === 'collection_catalog_changes' && category === 'Other Documents' ? ' version '+catalogEpoch : ''}</span></span>
           ${category === 'Transcripts' ? '<span class="fm_object_202"><span class="text">Another witness</span></span>' : ''}
           <span class="fm_object_204"><span class="text">${security}</span></span>
+          ${!dateCategory ? `<span class="fm_object_203"><span class="text">01/${String(index+1).padStart(2,'0')}/2026</span></span><span class="fm_object_${category === 'Exhibits' ? 314 : category === 'Key Documents' ? 284 : 308}"><span class="text">.pdf</span></span>` : ''}
+          ${category === 'Exhibits' ? '<span class="fm_object_308"><span class="text">GO GET IT</span></span>' : ''}
           <span class="fm_object_${category === 'Transcripts' ? 291 : category === 'Recordings' ? 292 : 299}"><button onclick="collectionDownload('${number}','${category}')">GO GET IT</button></span></td></tr>`;
       }).join('');
+      if (mode === 'collection_catalog_buffer' && category === 'Other Documents' && first+5<count) {
+        // An unloaded buffer row can retain old text while the viewport is ready.
+        tbody.insertAdjacentHTML('beforeend', `<tr role="row" class="v-grid-row" style="position:absolute;transform:translateY(${(first+5)*68}px);height:68px"><td><span class="fm_object_201"><span class="text">old-reference</span></span></td></tr>`);
+      }
     };
     scroll.addEventListener('scroll', () => {
       if (mode === 'collection_stalled') return;
+      if (mode === 'collection_catalog_delayed') {
+        // Observed live: new positions and old text coexist before server data arrives.
+        const first = Math.max(0, Math.floor(scroll.scrollTop/68)-1);
+        [...tbody.children].forEach((row,i) => {
+          row.classList.remove('v-grid-row-has-data');
+          row.style.transform=`translateY(${(first+i)*68}px)`;
+        });
+      }
       setTimeout(render, 20);
     });
     render();

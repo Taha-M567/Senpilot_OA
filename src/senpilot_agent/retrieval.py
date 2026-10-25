@@ -52,6 +52,8 @@ async def _ready_viewport(grid, count: int, timeout_ms: int) -> None:
     # Waiting for viewport coverage prevents racing the server's row update.
     await expect(grid).to_have_count(1, timeout=timeout_ms)
     await grid.page.wait_for_function("""count => {
+        const clients = Object.values(window.vaadin?.clients || {});
+        if (clients.some(c => typeof c.isActive === 'function' && c.isActive())) return false;
         const grids = document.querySelectorAll('.v-grid:has([role=grid])');
         if (grids.length !== 1) return false;
         const grid = grids[0];
@@ -61,6 +63,8 @@ async def _ready_viewport(grid, count: int, timeout_ms: int) -> None:
         let low = Infinity, high = -Infinity;
         let populated = 0;
         for (const row of rows) {
+            // Live Vaadin moves recycled rows before replacing their old text.
+            if (!row.classList.contains('v-grid-row-has-data')) continue;
             const id = row.querySelector('.fm_object_201 .text, .fm_object_268 .text, .fm_object_300 .text');
             if (!id || !id.innerText.trim()) continue;
             populated++;
