@@ -5,6 +5,9 @@ Starting point: `2f490a5`, with verified priority-driven downloads and ZIP creat
 This decision supersedes the separate intent-extraction/ranking workflow in
 `document-selection-plan.md`. Email intake and delivery remain last.
 
+Revision: requests are independent, one-shot jobs. There is no clarification
+conversation, follow-up-email matching, or pending request waiting for a reply.
+
 ## Decision and boundaries
 
 Use one model request to interpret the user's email and select/rank documents
@@ -12,19 +15,21 @@ from an observed UARB catalog. There is no intermediate LLM intent object, secon
 ranking call, model-driven tool loop, or human approval step. Retain one local
 execution-boundary check before constructing the existing `CollectionRequest`.
 
-For an eligible job, make exactly one generation request. Jobs with missing
-scope, an incomplete/oversized catalog, no public candidates, or missing model
+For an eligible job, make exactly one generation request. Jobs with an invalid
+matter, an incomplete/oversized catalog, no public candidates, or missing model
 configuration can finish with zero calls and an explicit outcome. Disable SDK
 automatic retries; a timeout, refusal, incomplete response, or invalid selection
 must not cause a repair call, fallback model, or a first-10 substitution.
 
 ```mermaid
 flowchart TD
-    A[Saved subject and body / future mailbox adapter] --> B[Locate matter and category]
-    B --> C[Verify matter and enumerate candidate metadata]
+    A[Saved subject and body / future mailbox adapter] --> B{Regex finds one valid matter?}
+    B -->|No| X[End request with a final status message]
+    B -->|Yes| C[Verify matter and catalog all five categories]
     C --> D[One LLM call: email plus complete catalog]
     D --> E[Final local schema and reference checks]
-    E --> F[Existing CollectionRequest]
+    E -->|Ready| F[Existing CollectionRequest]
+    E -->|Insufficient detail or no matches| X
     F --> G[Existing downloads and verified ZIP]
 ```
 
@@ -38,41 +43,39 @@ Example (illustrative request, not live document metadata):
 
 ```json
 {
-  "subject": "Other Documents for M12205",
-  "body_text": "Please send up to 10 Other Documents from M12205. Prioritize Board Orders, then compliance filings. Exclude confidentiality undertakings and prefer recent documents."
+  "subject": "Orders and filings for M12205",
+  "body_text": "Please send up to 10 documents from M12205. Prioritize Board Orders, then compliance filings. Exclude confidentiality undertakings and prefer recent documents."
 }
 ```
 
-For initial development, the body contains the current request only. Keep quoted
-thread history separate rather than silently treating previous requests as new
-instructions. Mailbox authentication, polling, threading, and sending are outside
-this milestone.
+For initial development, the file contains the current request only. Do not look
+up previous messages, recover missing details from a conversation, or maintain
+reply-thread state. Mailbox authentication, polling, and sending are deferred.
 
-## 2. Resolve catalog scope without another LLM call
+## 2. Gate the workflow on the matter number only
 
-The model cannot rank real references before we know where to retrieve them.
-Implement a small deterministic router that locates one `M[0-9]{5}` matter and
-the explicitly named canonical UARB category in the current subject/body. Accept
-case-insensitive names and deduplicate repeated mentions; do not infer semantic
-subtypes, exclusions, dates, preference tiers, or quantity here.
+Add `extract_matter_number(subject, body_text)` before any browser or model work.
+Use an ASCII, case-insensitive regex for a complete `M[0-9]{5}` token, normalize
+to uppercase, and deduplicate repeated references to the same matter. Require
+token boundaries so values such as M122055 or XM12205 do not supply a partial
+match. The existing CLI's `matter_argument()` validates a supplied argument; it
+does not yet extract a matter number from email text.
 
-Provide explicit CLI routing fields for local testing and requests whose natural
-language scope cannot be resolved mechanically. A later email adapter can supply
-equivalent structured routing fields. Contradictory explicit routing and obvious
-email scope must produce a scope error, not silently override the email.
-
-| Input situation | Action before calling the model |
+| Regex result | Action |
 |---|---|
-| One clear matter and category | Fetch that category's catalog |
-| An explicit category list in routing fields | Fetch those categories, sharing one global limit of 10 |
-| Missing/multiple matters, missing/ambiguous category scope | Return a clarification question; do not guess or invoke a second model |
-| Only a subtype such as "orders," without a UARB category | Request category/routing scope; do not assume Key Documents |
+| Exactly one distinct valid matter | Verify that matter and collect its catalog |
+| No valid matter | End as `invalid_request`; invoke no LLM |
+| More than one distinct valid matter | End as `invalid_request`; invoke no LLM, because a collection job handles one matter |
+| The same valid matter appears several times | Treat it as one matter |
 
-Free-form category negation or conflicting category mentions are not mechanically
-reliable routing instructions; require explicit scope in those cases. The router
-is deliberately narrow. General semantic interpretation of missing catalog scope
-would require a different design (another model turn or broader catalog reads),
-so it is not silently added to the single-call architecture.
+A final invalid-request message can say: "Submit a new request containing one
+valid matter number, for example M12205." This closes the job; it is not a
+question or an invitation to resume it. A later submission is a new request.
+
+Do not require or extract a UARB category before the model call. Category intent,
+subtypes such as orders, exclusions, quantity, dates, and priority are interpreted
+together by the single LLM call. This removes the category-routing restriction
+from the previous revision of this plan.
 
 ## 3. Build a complete catalog, without downloading documents
 
@@ -89,7 +92,9 @@ For each row, capture:
   those fields exist; retain raw text and mark unavailable values explicitly.
 - Whether the row can be uniquely addressed by the current downloader.
 
-Scope enumeration to the verified matter and requested categories. Traverse all
+Enumerate metadata across all five categories of the verified matter, so the LLM
+can infer category intent without an earlier model call. This is a catalog of
+publicly listed metadata, not a download of every file. Traverse all
 virtual rows, deduplicating recycled DOM observations using stable row/reference
 data and list positions. A list position proves snapshot coverage; it must not
 become the document's download identity. Repeated hearing dates are distinct rows
@@ -123,13 +128,29 @@ bounded output. Do not introduce an agent framework, embeddings store, or databa
 Supply fixed instructions separately from the email and catalog data. In the
 same call, the model must:
 
-1. Interpret quantity, requested order, exclusions, dates/topics, and whether
-   "only" or "prefer" allows other eligible documents.
+1. Interpret explicit or implied UARB categories, likely document subtypes,
+   quantity, requested order, exclusions, dates/topics, and whether "only" or
+   "prefer" allows other eligible documents.
 2. Match those instructions against supplied candidate metadata.
 3. Return at most the requested limit (maximum 10), in preferred order, with a
    concise selection reason and matching metadata evidence for each candidate.
-4. Return a clarification or no-match outcome when appropriate. A vague title
-   is not proof of document contents; do not invent full-text knowledge.
+4. Return a terminal `insufficient_detail` or `no_matches` result when appropriate.
+   Do not ask follow-up questions. A vague title is not proof of document contents;
+   do not invent full-text knowledge.
+
+Category and default policy:
+
+- If a category is explicit, respect it, including exclusions such as "no
+  Recordings." A subtype is not automatically the Key Documents category.
+- If categories are omitted but the email asks for orders/compliance filings or
+  other recognizable material, infer likely categories from the request and real
+  candidate metadata. Rank matching candidates across those categories.
+- If the email simply requests documents for the matter, allow all five
+  categories and default to newest eligible documents first, up to the requested
+  limit (10 by default). Record this assumption in the result.
+- If contradictory or insufficient instructions cannot support a defensible
+  selection, end the job with a message asking for a new, more detailed request.
+  Never create a pending conversation or another model turn.
 
 Example response shape (opaque IDs are illustrative):
 
@@ -137,20 +158,25 @@ Example response shape (opaque IDs are illustrative):
 {
   "status": "ready",
   "matter_number": "M12205",
-  "categories": ["Other Documents"],
+  "categories": ["Key Documents", "Other Documents"],
+  "category_basis": "inferred",
+  "assumptions": ["No UARB category was specified; matching orders and filings were considered across the matter."],
   "limit": 10,
   "ranked_documents": [
     {"candidate_id": "c0017", "reason": "Matches the first requested type: Board Order", "matched_text": "Board Order"},
     {"candidate_id": "c0004", "reason": "Matches the next requested type: compliance filing", "matched_text": "Compliance Filing"}
   ],
-  "clarification_question": null
+  "message": null
 }
 ```
 
-The status enum is `ready`, `needs_clarification`, or `no_matches`. Define all
-schema fields explicitly, reject additional fields, and use a nullable question
-for the non-ready branches. For `ready`, require a nonempty ranking and no
-clarification question; other statuses must not contain downloadable selections.
+The status enum is `ready`, `insufficient_detail`, or `no_matches`.
+`category_basis` is `explicit`, `inferred`, or `default_all`; assumptions explain
+inference/defaults without inventing user instructions. Define all schema fields
+explicitly and reject additional fields. For `ready`, require a nonempty ranking
+and a null message; non-ready statuses require a final explanatory message and
+must not contain downloadable selections. An insufficient-detail message says
+to submit a new request from scratch; it is not a clarification question.
 
 The model outputs candidate IDs rather than constructing filenames, URLs, or
 UARB identifiers. Ordered results become priorities 1, 2, 3, and so on; Python
@@ -172,12 +198,14 @@ the resulting capacity limit for the chosen model.
 After the model returns, check its completion/refusal state, parse its structured
 output, and validate the final selection locally:
 
-- Matter matches the verified matter; selected categories stay within scope.
+- Matter matches the regex-gated, verified matter; selected categories are valid
+  enum values and each chosen candidate belongs to the declared categories.
 - Candidate IDs exist in this catalog, are eligible, and are not repeated.
 - Canonical document references remain unique under `CollectionRequest` rules.
 - Selection length is within the returned requested limit and the hard cap of 10.
 - Matching-text evidence is present in the referenced candidate metadata.
-- Status, question, and ranking fields form a consistent ready/non-ready result.
+- Status, message, category-basis, assumptions, and ranking fields form a
+  consistent ready/non-ready result.
 
 Schema/reference checks cannot prove that the model correctly understood every
 email phrase. Preference/exclusion interpretation is evaluated with labelled
@@ -190,7 +218,7 @@ existing downloader and ZIP path. Reasons/audit fields stay outside that strict
 request object. No intent-validation round trip or additional model call occurs.
 
 Initially, cataloging and downloading can use separate browser sessions. Carry
-the verified scope and observed references forward; bind titles/witness labels
+the verified matter and observed references forward; bind titles/witness labels
 where supported and reverify rows during retrieval. Missing/changed references
 use the current explicit failure/partial-ZIP behavior. Do not ask the model to
 rank replacements or silently substitute unselected documents.
@@ -199,31 +227,34 @@ rank replacements or silently substitute unselected documents.
 
 | Step | Files and reviewable result |
 |---|---|
-| 1. Define input and output contracts | New `selection.py`: local subject/body input, narrow scope routing, candidate/result models, final mapping to existing `CollectionRequest` |
-| 2. Export the catalog | New `catalog.py` using existing browser helpers; full category enumeration with completeness and eligibility evidence |
+| 1. Define input and output contracts | New `selection.py`: local subject/body input, regex-only matter gate, terminal outcomes, candidate/result models, final mapping to existing `CollectionRequest` |
+| 2. Export the catalog | New `catalog.py` using existing browser helpers; all five categories of the verified matter, with completeness and eligibility evidence |
 | 3. Add the one-call adapter | New `llm.py`: configurable OpenAI client, schema/prompt version, one generation request, retries disabled, explicit non-ready/error handling |
-| 4. Connect local CLI execution | Add an LLM request-file mode with plan-only output by default; an explicit execute option passes an accepted selection to the existing collector |
+| 4. Connect local CLI execution | Add an LLM request-file mode that executes a valid ready selection automatically; optional dry-run output supports development |
 | 5. Verify model selection quality | Offline integration tests and a small labelled request/catalog evaluation set; opt-in live catalog/model/download acceptance |
 | 6. Document operation | README setup/configuration, sample request, saved evidence, optional dependency instructions; email intake/delivery still deferred |
 
-Plan-only mode makes the exact generated collection request reviewable without
-downloading files. It is a development capability, not a mandatory approval gate.
-The normal application entry can execute a valid ready result automatically.
-Mail integration later only replaces the saved subject/body source and consumes
-the existing result/ZIP; it does not add another model stage.
+Optional dry-run output makes the exact generated collection request reviewable
+without downloading files; it is not a mandatory approval step. Mail integration
+later only replaces the saved subject/body source and sends one final result or
+failure notice. It does not add a model stage, follow-up matching, or conversation
+state. A submission after a failure starts from scratch as a new independent job.
 
 ## Verification and completion gates
 
-- Offline tests cover scope routing, complete virtual-list traversal (including
-  preferred rows beyond the first viewport), repeated date rows, private entries,
+- Offline tests cover valid/invalid/partial/multiple matter-number tokens and
+  prove the model is never invoked when the regex gate fails. They also cover
+  complete virtual-list traversal (including preferred rows beyond the first
+  viewport), repeated date rows, private entries,
   cross-category duplicates, and incomplete/oversized catalogs.
 - Assert one generation/HTTP attempt for an eligible job, including simulated
   provider errors; assert zero on preflight failures. Test that SDK retries,
   repair prompts, tool loops, and chunked ranking cannot add hidden calls.
-- Test unknown/duplicate IDs, invalid limits, matter/scope mismatches, inconsistent
+- Test unknown/duplicate IDs, invalid limits, matter/category mismatches, inconsistent
   statuses, nonexistent matching evidence, refusals, malformed/incomplete output,
   and network timeouts. All must leave no new download request executable.
-- Labelled examples test orders before compliance filings, "only" versus
+- Labelled examples test implicit categories from orders/filings, the missing-
+  category newest-first default, orders before compliance filings, "only" versus
   "prefer," exclusions/negation, smaller quantities, recency, no matches, vague
   titles, and unrelated instructions embedded in email/catalog text. Judge
   acceptable relevance/tiers rather than one arbitrary order for equivalent rows.
@@ -234,6 +265,9 @@ the existing result/ZIP; it does not add another model stage.
   response ID/usage/latency when available, ranking, final collection request,
   and outcomes under ignored artifacts. Exclude credentials, mailbox transport
   metadata, raw email, and model-response audit files from the delivery ZIP.
+- Prove that insufficient-detail and invalid-request outcomes are terminal: a
+  new submission creates a new job, with no continuation token, conversation
+  history lookup, follow-up-email correlation, or retained waiting state.
 - Keep the existing 154-test collection regression suite green. No API calls are
   needed for ordinary offline tests; live model calls require configured access.
 

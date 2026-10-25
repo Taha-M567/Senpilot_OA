@@ -132,9 +132,12 @@ metadata/counts plus one validated file milestone.
 See the [download and ZIP plan](docs/download-and-zip-plan.md). The earlier
 [email-guided selection proposal](docs/document-selection-plan.md) is historical.
 The [single-call LLM plan](docs/single-call-llm-plan.md) defines the next stage:
-email text and a real catalog enter one model call, then its ranked references
-feed this collector. Email interpretation/ranking remain unimplemented; mailbox
-intake and delivery are left until last.
+a regex first requires one valid matter number; metadata across that matter's
+five categories and the email text then enter one model call. The model infers
+category intent and ranks real references for this collector. Each submission is
+an independent job, with no clarification conversation or email-thread matching.
+Email interpretation/ranking remain unimplemented; mailbox intake and delivery
+are left until last.
 
 ## Searching and reading the evidence
 
