@@ -134,8 +134,14 @@ See the [download and ZIP plan](docs/download-and-zip-plan.md). The earlier
 The [single-call LLM plan](docs/single-call-llm-plan.md) defines the next stage:
 a regex first requires one valid matter number; metadata across that matter's
 five categories and the email text then enter one model call. The model infers
-category intent and ranks real references for this collector. Each submission is
-an independent job, with no clarification conversation or email-thread matching.
+category intent and ranks real references for this collector. The complete
+eligible catalog must fit an explicit input budget; oversized requests end rather
+than selecting a first-X shortlist. Generic requests default to complementary,
+informative written documents, with recency secondary; transcripts and recordings
+require explicit or clearly implied intent. The logical ranking call allows at
+most one retry for a transient provider failure, with no repair/reranking call.
+Each submission is an independent job, with no clarification conversation or
+email-thread matching.
 Email interpretation/ranking remain unimplemented; mailbox intake and delivery
 are left until last.
 

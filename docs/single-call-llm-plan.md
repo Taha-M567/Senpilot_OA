@@ -7,26 +7,35 @@ This decision supersedes the separate intent-extraction/ranking workflow in
 
 Revision: requests are independent, one-shot jobs. There is no clarification
 conversation, follow-up-email matching, or pending request waiting for a reply.
+Agreed refinements: complete-catalog input within an explicit capacity budget,
+an informative written-document overview by default, and one bounded retry for
+transient provider failures.
 
 ## Decision and boundaries
 
-Use one model request to interpret the user's email and select/rank documents
-from an observed UARB catalog. There is no intermediate LLM intent object, second
+Use one logical model request to interpret the user's email and select/rank
+documents from an observed UARB catalog. There is no intermediate LLM intent object, second
 ranking call, model-driven tool loop, or human approval step. Retain one local
 execution-boundary check before constructing the existing `CollectionRequest`.
 
-For an eligible job, make exactly one generation request. Jobs with an invalid
-matter, an incomplete/oversized catalog, no public candidates, or missing model
+For an eligible job, use one ranking stage, normally one generation attempt,
+with at most one retry for a transient transport/provider failure (two attempts
+total). Jobs with an invalid matter, an incomplete/oversized catalog, no public
+candidates, or missing model
 configuration can finish with zero calls and an explicit outcome. Disable SDK
-automatic retries; a timeout, refusal, incomplete response, or invalid selection
-must not cause a repair call, fallback model, or a first-10 substitution.
+automatic retries so the adapter owns this bound. A refusal, incomplete response,
+or invalid selection must not cause a repair call, fallback model, or a first-10
+substitution. A transient retry repeats the same request; it does not add another
+interpretation or ranking stage.
 
 ```mermaid
 flowchart TD
     A[Saved subject and body / future mailbox adapter] --> B{Regex finds one valid matter?}
     B -->|No| X[End request with a final status message]
     B -->|Yes| C[Verify matter and catalog all five categories]
-    C --> D[One LLM call: email plus complete catalog]
+    C --> K{Complete input fits capacity budget?}
+    K -->|No| X
+    K -->|Yes| D[One logical LLM call; one transient retry allowed]
     D --> E[Final local schema and reference checks]
     E -->|Ready| F[Existing CollectionRequest]
     E -->|Insufficient detail or no matches| X
@@ -92,6 +101,10 @@ For each row, capture:
   those fields exist; retain raw text and mark unavailable values explicitly.
 - Whether the row can be uniquely addressed by the current downloader.
 
+Preserve the meaning of the site's date label, such as Date Filed or hearing
+date; do not relabel it as a file creation date. Filenames obtained only through
+download dialogs and downloaded file sizes are not assumed to be catalog fields.
+
 Enumerate metadata across all five categories of the verified matter, so the LLM
 can infer category intent without an earlier model call. This is a catalog of
 publicly listed metadata, not a download of every file. Traverse all
@@ -112,6 +125,19 @@ of eligible, uniquely addressable rows with the original metadata. Confirm new
 field selectors from the live site; do not invent dates/extensions for layouts
 that do not expose them.
 
+Historical live observations include 62 listed documents for M12205 and 331 for
+M12451 (the latter rechecked on October 25, 2026). These examples establish
+neither a typical matter size nor a maximum. During implementation, measure
+enumeration time and the compact serialized catalog's token size before choosing
+the initial input budget; document counts alone do not determine model capacity.
+
+The October 25 inspection showed up/down controls beside identifiers and security,
+and file-extension filters on Exhibits and Other Documents. No relevance sort was
+observed in the inspected layouts; date sorting and the arrows' behavior are not
+yet verified. Do not depend on website relevance ordering or use display order
+to select a first-X shortlist. Sorting may aid enumeration only after its
+behavior and completeness implications are verified.
+
 ## 4. Make the single structured model request
 
 The first provider adapter will use OpenAI Responses with strict JSON Schema in
@@ -124,6 +150,15 @@ Use the official Python SDK as an optional LLM dependency. Keep ordinary
 inspection/download commands usable without it, and preserve lazy imports.
 Use a server-side API key from configuration, an explicit request timeout, and
 bounded output. Do not introduce an agent framework, embeddings store, or database.
+
+The adapter may retry once after a short bounded delay for a temporary connection
+failure, timeout, retryable rate limit, or temporary server error. Distinguish a
+retryable rate limit from an exhausted quota. Invalid credentials, malformed API
+requests, exhausted quota, refusals, completed but unusable selections, and
+incomplete model responses end the job without a retry. Keep the model, email,
+catalog, instructions, and schema unchanged between attempts. Record each
+attempt and its outcome. A timeout may occur after the provider processed the
+first attempt, so a retry can incur another charge; two attempts is a hard bound.
 
 Supply fixed instructions separately from the email and catalog data. In the
 same call, the model must:
@@ -145,12 +180,34 @@ Category and default policy:
 - If categories are omitted but the email asks for orders/compliance filings or
   other recognizable material, infer likely categories from the request and real
   candidate metadata. Rank matching candidates across those categories.
-- If the email simply requests documents for the matter, allow all five
-  categories and default to newest eligible documents first, up to the requested
-  limit (10 by default). Record this assumption in the result.
+- If the email simply requests documents for the matter, default to an informative
+  overview drawn from Exhibits, Key Documents, and Other Documents, up to the
+  requested limit (10 by default). Exclude Transcripts and Recordings from this
+  default unless requested explicitly or clearly implied. Record the overview
+  assumption and explain the selected documents' purposes using listing metadata.
 - If contradictory or insufficient instructions cannot support a defensible
   selection, end the job with a message asking for a new, more detailed request.
-  Never create a pending conversation or another model turn.
+  Never create a pending conversation or ask the model for clarification.
+
+For the overview default, prefer complementary documents that explain the matter:
+
+| Purpose, in preferred order | Likely useful listing metadata |
+|---|---|
+| Outcome and reasons | Decisions, reasons, and substantive orders |
+| Original proposal | Application and major amendments |
+| Supporting or opposing material | Substantive evidence, reports, and submissions |
+| Implementation and follow-through | Compliance filings and implementation directions |
+| Administration of the proceeding | Hearing notices, scheduling letters, and routine correspondence |
+
+This is a preference for useful coverage, not a quota per purpose or category.
+Favor complementary purposes over apparently repetitive procedural documents;
+the Key Documents category alone does not establish informativeness. Skip
+purposes with no eligible candidates, such as a decision in an ongoing matter.
+An older application or decision may outrank recent routine correspondence.
+Recency breaks ties between similarly informative candidates, followed by stable
+reference ordering; unknown dates follow known dates. These are metadata-based
+judgments, not claims about unread document contents. Explicit requested scope,
+references, ordering, and exclusions take precedence over the overview default.
 
 Example response shape (opaque IDs are illustrative):
 
@@ -171,7 +228,7 @@ Example response shape (opaque IDs are illustrative):
 ```
 
 The status enum is `ready`, `insufficient_detail`, or `no_matches`.
-`category_basis` is `explicit`, `inferred`, or `default_all`; assumptions explain
+`category_basis` is `explicit`, `inferred`, or `default_overview`; assumptions explain
 inference/defaults without inventing user instructions. Define all schema fields
 explicitly and reject additional fields. For `ready`, require a nonempty ranking
 and a null message; non-ready statuses require a final explanatory message and
@@ -180,9 +237,11 @@ to submit a new request from scratch; it is not a clarification question.
 
 The model outputs candidate IDs rather than constructing filenames, URLs, or
 UARB identifiers. Ordered results become priorities 1, 2, 3, and so on; Python
-does not rerank them. If the user supplies no preference beyond category, use a
-disclosed newest-first tie-break with stable reference ordering; unknown dates
-sort after known dates. Exact requested references take precedence over soft
+does not rerank them. If the user supplies only a category, apply the overview's
+usefulness and complementary-coverage preferences within that explicit scope,
+including Transcripts or Recordings when those are the requested categories.
+Use recency and stable reference ordering as tie-breaks, with unknown dates after
+known dates. Exact requested references take precedence over soft
 preferences but do not override exclusions or category scope. Fewer than ten
 eligible matches is a valid result; "only" must not be padded with other types.
 
@@ -191,7 +250,12 @@ before submission, reserving room for output. If the entire eligible catalog
 does not fit, report `ranking_capacity_exceeded`. Do not silently truncate it,
 rank just the first screen, summarize it with another model, or split it into
 multiple model requests. Do not enable automatic context truncation. Document
-the resulting capacity limit for the chosen model.
+the resulting capacity limit for the chosen model. This is a limit on the complete
+input, not permission to keep the first X documents, the newest X, or a quota from
+each category. All eligible candidates must reach the model or the job ends before
+generation. Catalog input capacity and the global maximum of 10 output selections
+are separate limits. Any future shortlisting policy requires a separate design
+decision acknowledging that omitted candidates can never be selected.
 
 ## 5. Perform one final execution-boundary check
 
@@ -206,6 +270,9 @@ output, and validate the final selection locally:
 - Matching-text evidence is present in the referenced candidate metadata.
 - Status, message, category-basis, assumptions, and ranking fields form a
   consistent ready/non-ready result.
+- `default_overview` selections are restricted to Exhibits, Key Documents, and
+  Other Documents; requested or implied transcripts/recordings use explicit or
+  inferred scope instead.
 
 Schema/reference checks cannot prove that the model correctly understood every
 email phrase. Preference/exclusion interpretation is evaluated with labelled
@@ -215,7 +282,7 @@ correctness or use the model's confidence score as proof.
 Map each accepted candidate back to its recorded canonical fields, assigning its
 array position as priority. Build `CollectionRequest.from_dict()` and reuse the
 existing downloader and ZIP path. Reasons/audit fields stay outside that strict
-request object. No intent-validation round trip or additional model call occurs.
+request object. No intent-validation round trip or additional ranking stage occurs.
 
 Initially, cataloging and downloading can use separate browser sessions. Carry
 the verified matter and observed references forward; bind titles/witness labels
@@ -228,8 +295,8 @@ rank replacements or silently substitute unselected documents.
 | Step | Files and reviewable result |
 |---|---|
 | 1. Define input and output contracts | New `selection.py`: local subject/body input, regex-only matter gate, terminal outcomes, candidate/result models, final mapping to existing `CollectionRequest` |
-| 2. Export the catalog | New `catalog.py` using existing browser helpers; all five categories of the verified matter, with completeness and eligibility evidence |
-| 3. Add the one-call adapter | New `llm.py`: configurable OpenAI client, schema/prompt version, one generation request, retries disabled, explicit non-ready/error handling |
+| 2. Export the catalog | New `catalog.py` using existing browser helpers; all five categories of the verified matter, completeness and eligibility evidence, measured enumeration time and payload size |
+| 3. Add the one-call adapter | New `llm.py`: configurable OpenAI client, schema/prompt version, one logical ranking request with at most one transient retry, SDK retries disabled, explicit non-ready/error handling |
 | 4. Connect local CLI execution | Add an LLM request-file mode that executes a valid ready selection automatically; optional dry-run output supports development |
 | 5. Verify model selection quality | Offline integration tests and a small labelled request/catalog evaluation set; opt-in live catalog/model/download acceptance |
 | 6. Document operation | README setup/configuration, sample request, saved evidence, optional dependency instructions; email intake/delivery still deferred |
@@ -247,23 +314,34 @@ state. A submission after a failure starts from scratch as a new independent job
   complete virtual-list traversal (including preferred rows beyond the first
   viewport), repeated date rows, private entries,
   cross-category duplicates, and incomplete/oversized catalogs.
-- Assert one generation/HTTP attempt for an eligible job, including simulated
-  provider errors; assert zero on preflight failures. Test that SDK retries,
-  repair prompts, tool loops, and chunked ranking cannot add hidden calls.
+- Assert one generation attempt on ordinary success, at most two on retryable
+  transport/provider errors, and zero on preflight failures. Verify identical
+  request inputs on retry, bounded delay, and terminal failure after exhaustion.
+  Invalid credentials/requests, exhausted quota, refusals, incomplete responses,
+  and invalid selections must not retry. SDK retries, repair prompts, tool loops,
+  and chunked ranking cannot add hidden calls.
 - Test unknown/duplicate IDs, invalid limits, matter/category mismatches, inconsistent
   statuses, nonexistent matching evidence, refusals, malformed/incomplete output,
-  and network timeouts. All must leave no new download request executable.
+  and exhausted network timeouts. All terminal failures must leave no new download
+  request executable.
 - Labelled examples test implicit categories from orders/filings, the missing-
-  category newest-first default, orders before compliance filings, "only" versus
+  category informative-overview default, an older application/decision ahead of
+  recent routine correspondence, complementary purposes without category quotas,
+  exclusion of unrequested transcripts/recordings, an ongoing matter without a
+  decision, orders before compliance filings, "only" versus
   "prefer," exclusions/negation, smaller quantities, recency, no matches, vague
   titles, and unrelated instructions embedded in email/catalog text. Judge
   acceptable relevance/tiers rather than one arbitrary order for equivalent rows.
+- Oversized-input tests must prove zero generation attempts and no first-X,
+  newest-X, per-category, or first-screen truncation. Separate catalog capacity
+  assertions from the hard limit of 10 selected documents; record input token
+  sizing and browsing time for the live acceptance catalog.
 - One live acceptance request must select a relevant offscreen candidate ahead
   of less relevant initial rows, preserve its reasons and canonical references,
   and reuse verified collection/ZIP handling with no more than 10 files.
 - Save model/configuration and prompt/schema versions, catalog fingerprint,
-  response ID/usage/latency when available, ranking, final collection request,
-  and outcomes under ignored artifacts. Exclude credentials, mailbox transport
+  per-attempt outcomes, response ID/usage/latency when available, ranking, final
+  collection request, and outcomes under ignored artifacts. Exclude credentials, mailbox transport
   metadata, raw email, and model-response audit files from the delivery ZIP.
 - Prove that insufficient-detail and invalid-request outcomes are terminal: a
   new submission creates a new job, with no continuation token, conversation
