@@ -130,9 +130,11 @@ with a verified archive; `phase1_milestone_complete` still describes the earlier
 metadata/counts plus one validated file milestone.
 
 See the [download and ZIP plan](docs/download-and-zip-plan.md). The earlier
-[email-guided selection plan](docs/document-selection-plan.md) is upstream work
-to tackle later; this implementation performs no email interpretation or ranking
-inference.
+[email-guided selection proposal](docs/document-selection-plan.md) is historical.
+The [single-call LLM plan](docs/single-call-llm-plan.md) defines the next stage:
+email text and a real catalog enter one model call, then its ranked references
+feed this collector. Email interpretation/ranking remain unimplemented; mailbox
+intake and delivery are left until last.
 
 ## Searching and reading the evidence
 

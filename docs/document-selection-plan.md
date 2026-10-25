@@ -1,12 +1,15 @@
 # Plan: email-guided selection of up to 10 UARB documents
 
-Status: proposed design; collection and email interpretation are not implemented.
-Starting point: commit `ddd624d`, with one live-verified Other Documents download.
+Status: historical proposal. The single-call model design in
+[single-call-llm-plan.md](single-call-llm-plan.md) supersedes this document's
+separate intent-extraction/ranking workflow. Email interpretation and ranking
+remain unimplemented; downloading and ZIP creation are implemented.
+Original starting point: commit `ddd624d`, with one live-verified download.
 
 The downloader/ZIP stage is now specified separately in
 [download-and-zip-plan.md](download-and-zip-plan.md). It receives resolved document
-references and priorities. Email interpretation and hierarchy creation in this
-document are deferred until that execution stage is complete.
+references and priorities. That stage is complete; the single-call plan defines
+the next implementation, with mailbox integration left until last.
 
 ## Intended behavior
 
