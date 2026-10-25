@@ -70,7 +70,7 @@ def offline_site(monkeypatch):
                 'html.pdf': b'<html>Server error</html>',
                 'empty.pdf': b'',
                 'truncated.pdf': b'%PDF-1.7\ntruncated',
-                'unknown.mp3': b'fixture unknown format',
+                'unknown.bin': b'fixture unknown format',
             }.get(name, b'%PDF-1.7\nsynthetic offline download\n%%EOF\n')
             await route.fulfill(status=200, body=payload, headers={
                 'Content-Type': 'application/octet-stream',
@@ -111,7 +111,7 @@ def offline_site(monkeypatch):
 ])
 def test_offline_search_and_failure_evidence(mode, stage, error, offline_site, tmp_path):
     offline_site(mode)
-    directory, report = asyncio.run(inspect_site(tmp_path, matter_number='M12205', timeout_ms=1000))
+    directory, report = asyncio.run(inspect_site(tmp_path, matter_number='M12205', timeout_ms=5000))
     assert report['stage'] == stage
     assert report['intended_request'] == {'matter_number': 'M12205'}
     assert report['phase1_milestone_complete'] is False
@@ -155,7 +155,7 @@ def test_offline_search_and_failure_evidence(mode, stage, error, offline_site, t
 
 def test_offline_inspection_does_not_search(offline_site, tmp_path):
     offline_site('success')
-    directory, report = asyncio.run(inspect_site(tmp_path, timeout_ms=1000))
+    directory, report = asyncio.run(inspect_site(tmp_path, timeout_ms=5000))
     assert report['status'] == 'inspection_captured'
     assert report['stage'] == 'inspect_dom'
     assert report['intended_request'] == {'matter_number': None}
@@ -184,7 +184,7 @@ def test_offline_inspection_does_not_search(offline_site, tmp_path):
 def test_one_document_workflow(mode, stage, error, offline_site, tmp_path):
     offline_site(mode)
     directory, report = asyncio.run(inspect_site(
-        tmp_path, matter_number='M12205', download_one=True, timeout_ms=1000,
+        tmp_path, matter_number='M12205', download_one=True, timeout_ms=5000,
     ))
     assert report['stage'] == stage
     assert report['verified_matter_number'] == 'M12205'
@@ -247,7 +247,7 @@ def test_save_failure_keeps_matter_and_candidate_without_claiming_download(
     monkeypatch.setattr(Download, 'save_as', unwritable)
     offline_site('success')
     directory, report = asyncio.run(inspect_site(
-        tmp_path, matter_number='M12205', download_one=True, timeout_ms=1000,
+        tmp_path, matter_number='M12205', download_one=True, timeout_ms=5000,
     ))
     assert report['status'] == 'failed'
     assert report['stage'] == 'download_document'

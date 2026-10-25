@@ -99,3 +99,50 @@ def test_cli_passes_download_request_and_prints_saved_file(tmp_path, monkeypatch
     assert 'Downloaded and validated: 1 Other Documents file(s)' in output
     assert str(tmp_path / 'downloads/fixture.pdf') in output
     assert 'remains unverified' not in output
+
+
+@pytest.mark.parametrize('contents', [
+    '{', '{}', '{"matter_number":"M12205","limit":11,"documents":[]}',
+    '{"matter_number":"M12205","documents":[{"category":"Other Documents","document_number":"123","priority":true}]}',
+])
+def test_invalid_collection_json_fails_before_browser_launch(contents, tmp_path, monkeypatch, capsys):
+    path = tmp_path / 'request.json'
+    path.write_text(contents)
+    monkeypatch.setattr(sys, 'argv', ['senpilot-probe','--collection-request',str(path)])
+    monkeypatch.setattr(cli, 'inspect_site', lambda *a, **k: pytest.fail('Unexpected browser launch'))
+    with pytest.raises(SystemExit) as error:
+        cli.main()
+    assert error.value.code == 2
+    assert 'Invalid collection request' in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(('status','exit_code'), [('collection_complete',0),('collection_partial',1),('collection_empty',0)])
+def test_collection_cli_passes_priorities_and_reports_archive(status, exit_code, tmp_path, monkeypatch, capsys):
+    path = tmp_path / 'request.json'
+    path.write_text('{"matter_number":"M12205","documents":[{"category":"Other Documents","document_number":"123","priority":2}]}')
+
+    async def inspect(output, **kwargs):
+        request = kwargs['collection_request']
+        assert request.matter_number == 'M12205'
+        assert request.selected()[0].document_number == '123'
+        assert request.selected()[0].priority == 2
+        return tmp_path, {
+            'status':status, 'stage':'create_archive', 'metadata_counts_complete':True,
+            'matter_metadata':{}, 'category_counts':{}, 'total_document_count':7,
+            'downloaded_document_count': 0 if status=='collection_empty' else 1,
+            'archive': None if status=='collection_empty' else {'path':'delivery.zip'},
+        }
+
+    monkeypatch.setattr(cli, 'inspect_site', inspect)
+    monkeypatch.setattr(sys, 'argv', ['senpilot-probe','--collection-request',str(path)])
+    assert cli.main() == exit_code
+    text = capsys.readouterr().out
+    assert ('Delivery ZIP:' in text) == (status != 'collection_empty')
+    assert 'download remains unverified' not in text
+
+
+def test_collection_cli_rejects_conflicting_modes(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, 'argv', ['senpilot-probe','--matter','M12205','--collection-request','unused.json'])
+    with pytest.raises(SystemExit) as error:
+        cli.main()
+    assert error.value.code == 2

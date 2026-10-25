@@ -70,7 +70,8 @@ document.querySelector('.fm_object_258 button').addEventListener('click', () => 
     if (mode === 'missing_title') title.remove();
   }, 100);
   setTimeout(() => {
-    const counts = {Exhibits: 2, 'Key Documents': 4, 'Other Documents': 7, Transcripts: 0, Recordings: 0};
+    const counts = mode.startsWith('collection_') ? collectionCounts() :
+      {Exhibits: 2, 'Key Documents': 4, 'Other Documents': 7, Transcripts: 0, Recordings: 0};
     const buttons = body.querySelectorAll('.fm_object_276 button');
     for (const button of buttons) {
       const name = button.textContent.split(' - ')[0];
@@ -82,7 +83,9 @@ document.querySelector('.fm_object_258 button').addEventListener('click', () => 
     if (mode === 'malformed_count') other.textContent = 'Other Documents - many';
     if (mode === 'negative_count') other.textContent = 'Other Documents - -1';
     if (mode === 'count_timeout') other.textContent = 'Other Documents - ';
-    other.addEventListener('click', showDocuments);
+    if (mode.startsWith('collection_')) {
+      for (const button of buttons) button.addEventListener('click', () => showCollection(button.textContent.split(' - ')[0]));
+    } else other.addEventListener('click', showDocuments);
   }, 160);
 });
 
@@ -97,6 +100,7 @@ function showDocuments() {
       [123456, 987654].map((number, index) => `<tr role="row" class="v-grid-row"><td role="gridcell">
         <div class="fm_object_201"><div class="text">${mode === 'missing_document_number' ? '' : number}</div></div>
         <div class="fm_object_202"><div class="text">Fixture ${index ? 'second' : 'first'} document</div></div>
+        <div class="fm_object_204"><div class="text">Public</div></div>
         <button onclick="prepareDownload()">GO GET IT</button>
       </td></tr>`).join('') + '</tbody></table>';
     if (mode === 'ambiguous_grid') body.append(body.querySelector('table').cloneNode(true));
@@ -110,7 +114,7 @@ function prepareDownload() {
     dialog.setAttribute('role', 'dialog');
     dialog.setAttribute('aria-label', 'Download Files');
     const filename = ({html_download: 'html.pdf', empty_download: 'empty.pdf',
-      truncated_download: 'truncated.pdf', unknown_download: 'unknown.mp3'})[mode] || '123456.pdf';
+      truncated_download: 'truncated.pdf', unknown_download: 'unknown.bin'})[mode] || '123456.pdf';
     dialog.innerHTML = '<div>Download Files</div><div>Your files are ready for download. Please click the button to download each file:</div>' +
       `<div class="fm-download-button" role="button" tabindex="0">${filename}</div><button>Close</button>`;
     dialog.querySelector('.fm-download-button').onclick = () => {
@@ -125,5 +129,85 @@ function prepareDownload() {
     if (mode === 'ambiguous_filename') dialog.append(dialog.querySelector('.fm-download-button').cloneNode(true));
     document.body.append(dialog);
   }, 40);
+}
+
+function collectionCounts() {
+  const dates = mode.startsWith('collection_dates');
+  return {Exhibits: 2, 'Key Documents': 3, 'Other Documents': 25, Transcripts: dates ? 2 : 0, Recordings: dates ? 2 : 0};
+}
+
+function showCollection(category) {
+  const counts = collectionCounts();
+  const count = counts[category];
+  setTimeout(() => {
+    body.innerHTML = Object.entries(counts).map(([name,n]) =>
+      `<div class="${name === category ? 'fm-selected' : ''}"><button onclick="showCollection('${name}')">${name} - ${n}</button></div>`).join('') +
+      `<div class="iwps_header">${category === 'Key Documents' ? '' :
+        `<div class="fm_object_${category === 'Exhibits' ? 319 : 213}">Found Count: ${count}</div>`}</div>` +
+      '<button>GO GET IT</button>' +
+      '<div class="v-grid" style="position:relative;height:204px;width:650px">' +
+      `<div class="v-grid-scroller-vertical" style="${count<=3 ? 'display:none;' : ''}position:absolute;right:0;height:204px;width:16px;overflow-y:scroll"><div style="height:${count*68}px;width:1px"></div></div>` +
+      '<div style="position:relative;overflow:hidden;height:204px;width:630px"><table role="grid"><tbody class="v-grid-body" style="display:block"></tbody></table></div></div>';
+    const scroll = body.querySelector('.v-grid-scroller-vertical');
+    const tbody = body.querySelector('tbody');
+    const render = () => {
+      const first = Math.max(0, Math.floor(scroll.scrollTop/68) - 1);
+      tbody.style.transform = `translateY(${-scroll.scrollTop}px)`;
+      tbody.innerHTML = Array.from({length:Math.min(5,count-first)},(_,i) => {
+        const index = first+i;
+        const dateCategory = category === 'Transcripts' || category === 'Recordings';
+        const number = dateCategory ? `01/0${mode === 'collection_dates_ambiguous' ? 7 : 7+index}/2026` :
+          category === 'Exhibits' ? `H-${index+1}` : String((category === 'Key Documents' ? 200001 : 100001)+index);
+        const idClass = category === 'Exhibits' ? 300 : category === 'Key Documents' ? 268 : 201;
+        const shown = mode === 'collection_ambiguous' && i === 1 ?
+          String((category === 'Key Documents' ? 200001 : 100001)+first) : number;
+        const security = mode === 'collection_private' && number === '100002' ? 'Confidential' : 'Public';
+        return `<tr role="row" class="v-grid-row v-grid-row-has-data" style="position:absolute;display:block;transform:translateY(${index*68}px);height:68px;width:620px"><td role="gridcell" style="display:block">
+          <span class="fm_object_${idClass}"><span class="text">${shown}</span></span>
+          <span class="fm_object_202"><span class="text">${category === 'Transcripts' ? 'Witness '+index : category === 'Recordings' ? 'Day '+(index+1) : 'Fixture document '+number}</span></span>
+          ${category === 'Transcripts' ? '<span class="fm_object_202"><span class="text">Another witness</span></span>' : ''}
+          <span class="fm_object_204"><span class="text">${security}</span></span>
+          <span class="fm_object_${category === 'Transcripts' ? 291 : category === 'Recordings' ? 292 : 299}"><button onclick="collectionDownload('${number}','${category}')">GO GET IT</button></span></td></tr>`;
+      }).join('');
+    };
+    scroll.addEventListener('scroll', () => {
+      if (mode === 'collection_stalled') return;
+      setTimeout(render, 20);
+    });
+    render();
+  }, 30);
+}
+
+function collectionDownload(number, category) {
+  if (mode === 'collection_missing_dialog' && number === '100002') return;
+  const dates = category === 'Transcripts' || category === 'Recordings';
+  if (dates) {
+    const exportDialog = document.createElement('div');
+    exportDialog.setAttribute('role','dialog'); exportDialog.setAttribute('aria-label','Export Field to File');
+    const exportName = mode === 'collection_dates_comma' ? 'Transcripts,01072026.pdf' : category+'-'+number.replaceAll('/','')+(category === 'Recordings' ? '.MP3' : '.pdf');
+    exportDialog.innerHTML = `<input type="text" value="${mode === 'collection_dates_blank_export' ? '' : exportName}"><button>OK</button><button>Cancel</button>`;
+    exportDialog.querySelector('button').onclick = () => {
+      const filename = exportDialog.querySelector('input').value;
+      exportDialog.remove(); ready(filename);
+    };
+    exportDialog.querySelector('button:last-child').onclick = () => exportDialog.remove();
+    document.body.append(exportDialog);
+  } else ready();
+  function ready(exportName) { setTimeout(() => {
+    const dialog = document.createElement('div');
+    dialog.setAttribute('role','dialog'); dialog.setAttribute('aria-label','Download Files');
+    const filename = exportName || (mode === 'collection_html' && number === '100002' ? 'html.pdf' : `${number}.pdf`);
+    dialog.innerHTML = `<div>Download Files</div><div role="button" class="fm-download-button" tabindex="0">${filename}</div><button>Close</button>`;
+    dialog.querySelector('.fm-download-button').onclick = () => {
+      if (mode === 'collection_download_timeout' && number === '100002') return;
+      const anchor = document.createElement('a');
+      anchor.href='https://uarb.novascotia.ca/fixture/'+filename;
+      anchor.download=filename; document.body.append(anchor); anchor.click(); anchor.remove();
+    };
+    dialog.querySelector('button').onclick = () => {
+      if (mode !== 'collection_close_failure') dialog.remove();
+    };
+    document.body.append(dialog);
+  },30); }
 }
 </script>

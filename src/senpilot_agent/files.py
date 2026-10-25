@@ -73,4 +73,36 @@ def validate_download(path: Path) -> FileEvidence:
             raise ValueError("Download is not a valid ZIP container") from exc
         validation = "ZIP container CRC checked"
         format_validated = True
+    elif path.suffix.lower() == ".mp3":
+        _check_mp3_frame(path, size)
+        validation = "MP3 ID3 size and first MPEG Layer III frame checked; not fully decoded"
+        format_validated = True
     return FileEvidence(path.name, size, checksum, validation, format_validated)
+
+
+def _check_mp3_frame(path: Path, size: int) -> None:
+    """Bounded header/first-frame check, not an audio decoder or integrity scan."""
+    with path.open("rb") as stream:
+        tag = stream.read(10)
+        start = 0
+        if tag.startswith(b"ID3"):
+            if len(tag) != 10 or tag[3] not in {2, 3, 4} or any(b & 0x80 for b in tag[6:10]):
+                raise ValueError("Invalid MP3 ID3 header")
+            start = 10 + sum(b << shift for b, shift in zip(tag[6:10], (21, 14, 7, 0)))
+            if start >= size:
+                raise ValueError("MP3 ID3 tag exceeds the audio payload")
+        stream.seek(start)
+        data = stream.read(4096)
+    for offset in range(max(0, len(data) - 3)):
+        a, b, c, _ = data[offset:offset + 4]
+        version, layer = (b >> 3) & 3, (b >> 1) & 3
+        rate, sample = c >> 4, (c >> 2) & 3
+        if a != 255 or b & 0xE0 != 0xE0 or version == 1 or layer != 1 or rate in {0, 15} or sample == 3:
+            continue
+        bitrates = ([0,32,40,48,56,64,80,96,112,128,160,192,224,256,320] if version == 3
+                    else [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160])
+        frequency = [44100, 48000, 32000][sample] // ({3:1, 2:2, 0:4}[version])
+        length = ((144000 if version == 3 else 72000) * bitrates[rate] // frequency) + ((c >> 1) & 1)
+        if start + offset + length <= size:
+            return
+    raise ValueError("MP3 MPEG Layer III frame signature or complete first frame is missing")

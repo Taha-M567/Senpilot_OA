@@ -43,7 +43,7 @@ def test_missing_file_rejected(tmp_path):
 
 
 def test_unknown_format_is_explicitly_unvalidated(tmp_path):
-    path = tmp_path / "recording.mp3"
+    path = tmp_path / "recording.unknown"
     path.write_bytes(b"unrecognized recording bytes")
     evidence = validate_download(path)
     assert evidence.validation == "nonempty; format not validated"
@@ -61,4 +61,25 @@ def test_invalid_zip_rejected(tmp_path):
     path = tmp_path / "file.zip"
     path.write_bytes(b"not a zip")
     with pytest.raises(ValueError, match="ZIP"):
+        validate_download(path)
+
+
+def test_mp3_basic_frame_validation_with_and_without_id3(tmp_path):
+    frame = b'\xff\xfb\x90\x64' + b'\0' * 413
+    path = tmp_path / 'recording.mp3'
+    for payload in (frame, b'ID3\x04\0\0\0\0\0\x04test' + frame):
+        path.write_bytes(payload)
+        evidence = validate_download(path)
+        assert evidence.format_validated is True
+        assert 'not fully decoded' in evidence.validation
+
+
+@pytest.mark.parametrize('payload', [
+    b'not MP3 bytes', b'\xff\xfb\x90\x64', b'ID3\x04\0\0\0\0\0\x04test',
+    b'ID3\x04\0\0\x80\0\0\0',
+])
+def test_mp3_invalid_or_truncated_first_frame_is_rejected(tmp_path, payload):
+    path = tmp_path / 'recording.mp3'
+    path.write_bytes(payload)
+    with pytest.raises(ValueError, match='MP3'):
         validate_download(path)

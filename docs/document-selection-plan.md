@@ -3,6 +3,11 @@
 Status: proposed design; collection and email interpretation are not implemented.
 Starting point: commit `ddd624d`, with one live-verified Other Documents download.
 
+The downloader/ZIP stage is now specified separately in
+[download-and-zip-plan.md](download-and-zip-plan.md). It receives resolved document
+references and priorities. Email interpretation and hierarchy creation in this
+document are deferred until that execution stage is complete.
+
 ## Intended behavior
 
 Read the user's request, inventory the permitted document categories, rank the

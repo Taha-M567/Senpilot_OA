@@ -1,9 +1,9 @@
 # Senpilot Regulatory Document AI Agent
 
-The **Phase 1 milestone is verified**: live matter metadata, all five category
-counts, and one persisted, validated **Other Documents** download. The broader
-assignment remains in progress: collecting up to 10 files, other categories,
-ZIP creation, and email intake/delivery are still pending.
+The collection stage accepts **supplied document priorities**, downloads up to
+**10 selected documents**, and creates a verified **delivery ZIP** with a
+manifest. Live matter verification, metadata, and all five category counts are
+retained. Email interpretation, LLM ranking, and email intake/delivery are deferred.
 
 Values in the assignment PDF are examples, never application defaults. The
 command has no default matter number and downloads only when explicitly asked.
@@ -13,8 +13,11 @@ command has no default matter number and downloads only when explicitly asked.
 ```text
 src/senpilot_agent/
   cli.py       # Inspection, matter-details, and one-document command
-  probe.py     # Async Playwright search, extraction, download, and evidence
-  files.py     # Safe filenames, basic format checks, SHA-256
+  probe.py     # Browser lifecycle, search, metadata/counts, reports
+  collection.py # Strict request contract and supplied priority order
+  retrieval.py # Category navigation, virtual scrolling, download by reference
+  archive.py   # Delivery ZIP, manifest, CRC and checksum verification
+  files.py     # Safe filenames, basic PDF/ZIP/MP3 checks, SHA-256
 tests/         # Offline tests; no requests to the public site
 docs/          # Assignment and investigation notes
 artifacts/     # Ignored local reports, DOM, screenshots, traces
@@ -22,9 +25,8 @@ artifacts/     # Ignored local reports, DOM, screenshots, traces
 
 Python **3.12+** and Playwright are the runtime requirements. Playwright operates
 the browser deterministically; pytest is the only development dependency. The
-helpers use the Python standard library. Pydantic, Gmail, LLMs, LangGraph, storage,
-and Docker are deferred to their planned phases. There is no reason to install
-them for a browser feasibility check.
+helpers use the Python standard library. No LLM, email SDK, agent framework,
+database, or ZIP dependency is required for downloading and packaging.
 
 ## Setup on this Windows machine
 
@@ -55,6 +57,82 @@ Without an editable package installation, run from source:
 $env:PYTHONPATH = "$PWD\src"
 .\.venv\Scripts\python.exe -m senpilot_agent.cli --headed
 ```
+
+## Download and ZIP supplied priorities
+
+```powershell
+$env:PLAYWRIGHT_BROWSERS_PATH = "$PWD\.cache\ms-playwright"
+.\.venv\Scripts\senpilot-probe.exe --collection-request examples/collection-request.json
+```
+
+The sample contains historical M12205 references and requests three files; it
+does not imply those documents will always remain available. Supply current
+references from the upstream selection stage or a manually prepared JSON file:
+
+```json
+{
+  "matter_number": "M12205",
+  "limit": 10,
+  "documents": [
+    {"category": "Other Documents", "document_number": "102674", "priority": 1},
+    {"category": "Exhibits", "document_number": "H-2", "priority": 2}
+  ]
+}
+```
+
+Smaller priority numbers come first; ties preserve input order. The limit is
+global, defaults to 10, and must be 1–10. All supplied entries are validated
+before browser launch, including entries beyond the selected limit. Unknown
+fields, arbitrary URLs, duplicate numeric/exhibit identifiers, and invalid
+matter/category/priority values are rejected. `--collection-request` cannot be
+combined with `--matter` or `--download-one`.
+
+For Transcripts and Recordings, supply `hearing_date` in the site's MM/DD/YYYY
+format instead of `document_number`. An optional exact `title` distinguishes
+rows sharing a date (a displayed witness name for transcripts). For example:
+
+```json
+{"category": "Recordings", "hearing_date": "01/12/2026", "title": "Day 4 - TRK 2", "priority": 1}
+```
+
+The downloader verifies the selected matter/category, navigates the virtual
+list, and locates each reference rather than downloading the first visible rows.
+Date references are checked across the category for ambiguity. Only Public rows
+are downloaded. Where present, Export Field to File is confirmed using the
+site's default filename, replacing commas with underscores to avoid FileMaker's
+malformed download header, followed by the Download Files filename button.
+Each file is saved and validated before the dialog closes and retrieval proceeds.
+
+The run contains `delivery.zip` with `documents/` and `manifest.json`. The manifest
+includes verified metadata/counts, supplied priorities, selected references,
+per-document outcomes, file sizes, and SHA-256 hashes. Archive member names,
+sizes, CRC, manifest bytes, and document hashes are verified before publication.
+Browser traces, HTML, session evidence, and failed files remain outside delivery.
+
+Missing, private, ambiguous, unvalidated, or failed files are recorded without
+substitution. Retrieval continues when dialog/browser state can be restored.
+Different selected references with identical bytes are both retained and linked
+by `same_content_as`. No lower-ranked candidate is automatically substituted.
+An uncertain download-event timeout stops further attempts to prevent attributing
+a late download to another selection. The actual downloaded filename must also
+match the filename shown in the selected dialog.
+
+| Report status | Meaning | Exit code |
+|---|---|---|
+| `collection_complete` | Every selected reference saved/validated and ZIP verified | 0 |
+| `collection_partial` | ZIP contains successes; some selections failed or were not attempted | 1 |
+| `collection_empty` | Empty input list; matter metadata captured; no ZIP | 0 |
+| `failed` | No successful files, browser failure before collection, or archive failure | 1 |
+
+An empty category for a supplied reference is a failed selection. No successful
+files means no ZIP. `collection_complete` is true only for a complete collection
+with a verified archive; `phase1_milestone_complete` still describes the earlier
+metadata/counts plus one validated file milestone.
+
+See the [download and ZIP plan](docs/download-and-zip-plan.md). The earlier
+[email-guided selection plan](docs/document-selection-plan.md) is upstream work
+to tackle later; this implementation performs no email interpretation or ranking
+inference.
 
 ## Searching and reading the evidence
 
@@ -105,7 +183,8 @@ file before browser closure. No new download host was needed.
 Zero Other Documents, ambiguous controls, missing dialogs, download/save
 failures, and invalid files produce failure reports. An unfamiliar format is
 saved with evidence but fails this validation milestone. There are no retries.
-This flag retrieves one file from Other Documents only; it does not create a ZIP.
+This diagnostic flag retrieves one file from Other Documents only; use
+`--collection-request` for multiple files and a ZIP.
 
 Each invocation creates a unique directory under `artifacts/` with `report.json`.
 When browser startup/navigation succeeds, it also attempts to save:
@@ -133,6 +212,9 @@ and counts were captured. The report records `intended_request.matter_number`,
 - `downloaded_documents`: validated files with those associations plus filename,
   size, SHA-256, validation description, and `format_validated`.
 - `downloaded_document_count`: number of persisted files that passed validation.
+- Collection mode also records `collection_request`, `selected_documents`,
+  `document_outcomes`, `archive`, and `collection_complete`. Failures can include
+  per-selection HTML/text/screenshots under `failures/`.
 
 `document_downloaded` and exit code 0 mean the one-file workflow succeeded.
 `phase1_milestone_complete` becomes true only after metadata/count extraction
@@ -144,7 +226,8 @@ and any candidate/path evidence; failed or unvalidated files are not counted.
 `failed` exits with code 1 and records the error and stage, including
 `locate_matter_field`, `submit_matter_search`, `verify_matter`, `extract_metadata`,
 `extract_category_counts`, `open_category`, `select_document`, `prepare_download`,
-`download_document`, or `validate_download`. A verified identifier remains
+`locate_document`, `prepare_export`, `download_document`, `validate_download`,
+`close_download_dialog`, or `create_archive`. A verified identifier remains
 available if later extraction fails; completed metadata is also retained if
 count extraction fails.
 Failure evidence uses the same directory structure.
@@ -177,6 +260,9 @@ run, with structured output compared against the saved page text and screenshot.
 A fresh live `--download-one` run also saved document 102674, **Board Order**, as
 a 170,571-byte PDF and verified its checksum after browser closure. See the
 investigation notes for the historical evidence; future runs use live data.
+The collection stage has also produced a verified ten-document ZIP across
+Other Documents, Key Documents, and Exhibits, plus a separate live transcript
+and MP3 recording ZIP. See [collection investigation](docs/collection-investigation.md).
 
 The offline browser fixtures reproduce the observed styled-div activation,
 Tab commit, three Search controls, asynchronous detail data, and no-result
@@ -186,12 +272,17 @@ responses locally in Chromium without contacting UARB. They cover
 success, zero counts, blank optional fields, malformed/missing counts, missing or
 ambiguous widgets, workflow timeouts, failed saves, and invalid downloads.
 Install Chromium as above before running the complete suite.
-The latest complete offline run passed **81 tests on Python 3.14.2**.
+The earlier one-file milestone passed **81 tests on Python 3.14.2**; the collection
+stage adds request, virtual-list retrieval, recovery, and ZIP integrity tests.
+The complete collection-stage suite passed **154 tests on Python 3.14.2**.
+If Windows denies access to a temp directory from an earlier sandbox session,
+use `--basetemp artifacts/pytest-local -o cache_dir=artifacts/pytest-cache`.
 
 The existing validator rejects empty files, HTML error responses, basic malformed
-PDFs, and corrupt ZIP containers, and calculates SHA-256. A PDF header/end marker
-is a basic check rather than a full PDF parse. Unknown formats are explicitly
-reported as unvalidated. No archive delivery or email functionality exists yet.
+PDFs, corrupt ZIP containers, and MP3 files without a plausible complete first
+MPEG Layer III frame, and calculates SHA-256. PDF markers and MP3 headers are
+basic checks, not full parsing/decoding. Unknown formats are explicitly reported
+as unvalidated and excluded from delivery. Email functionality remains pending.
 
 Official references: [Playwright installation](https://playwright.dev/python/docs/intro),
 [download events and persistence](https://playwright.dev/python/docs/downloads),

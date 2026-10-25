@@ -1,4 +1,4 @@
-"""Inspect UARB, extract matter details, and optionally persist one document."""
+"""Inspect UARB, extract matter details, and execute document collection requests."""
 
 import asyncio
 from datetime import datetime, timezone
@@ -8,7 +8,9 @@ import re
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-from .files import safe_download_path, validate_download
+from .archive import create_delivery_archive
+from .collection import CollectionRequest
+from .retrieval import collect_documents, download_row
 
 
 UARB_URL = "https://uarb.novascotia.ca/fmi/webd/UARB15"
@@ -34,12 +36,15 @@ async def inspect_site(
     timeout_ms: int = 30_000, inspect_seconds: int = 0,
     matter_number: str | None = None,
     download_one: bool = False,
+    collection_request: CollectionRequest | None = None,
 ) -> tuple[Path, dict]:
     """Capture live DOM and controls, or a truthful failure report.
 
     Imports are lazy so a missing Playwright installation still produces a useful
     diagnostic. Only explicitly allowed UARB network requests are permitted.
     """
+    if matter_number is None and isinstance(collection_request, CollectionRequest):
+        matter_number = collection_request.matter_number
     run_dir = output / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
                         + "_" + uuid4().hex[:8])
     run_dir.mkdir(parents=True, exist_ok=False)
@@ -57,6 +62,9 @@ async def inspect_site(
         "download_candidate": None,
         "downloaded_documents": [],
         "downloaded_document_count": 0,
+        "document_outcomes": [],
+        "archive": None,
+        "collection_complete": False,
         "status": "starting",
         "stage": "import_playwright",
         "blocked_origins": [],
@@ -67,6 +75,14 @@ async def inspect_site(
     tracing_started = False
     try:
         report["stage"] = "validate_request"
+        if collection_request is not None:
+            if not isinstance(collection_request, CollectionRequest):
+                raise ValueError("collection_request must be a validated CollectionRequest")
+            if download_one or matter_number != collection_request.matter_number:
+                raise ValueError("Conflicting collection, matter, or one-file requests")
+            report["collection_request"] = collection_request.to_dict()
+            report["selected_documents"] = [d.to_dict() for d in collection_request.selected()]
+            report["purpose"] = "Download supplied document priorities and create a delivery ZIP"
         if download_one:
             report["intended_request"].update(document_category="Other Documents", download_limit=1)
             if matter_number is None:
@@ -140,6 +156,8 @@ async def inspect_site(
                     await _extract_matter_details(detail, report, timeout_ms)
                     if download_one:
                         await _download_one_other_document(page, detail, report, run_dir, timeout_ms)
+                    elif collection_request is not None:
+                        await collect_documents(page, collection_request, report, run_dir, timeout_ms, allowed_url)
                 if inspect_seconds:
                     # Explicit human inspection window, not a readiness heuristic.
                     await asyncio.sleep(inspect_seconds)
@@ -163,6 +181,7 @@ async def inspect_site(
                     )
                     report["frames"].append({"index": index, "controls": controls})
                 report["status"] = (
+                    "collection_pending_archive" if collection_request is not None else
                     "document_downloaded" if download_one else
                     "matter_found" if matter_number is not None else "inspection_captured"
                 )
@@ -193,9 +212,51 @@ async def inspect_site(
         report["status"] = "failed"
         report["error"] = {"type": type(exc).__name__, "message": str(exc)}
     finally:
+        if isinstance(collection_request, CollectionRequest) and "selected_documents" in report:
+            _finalize_collection(run_dir, report)
         report["finished_at"] = datetime.now(timezone.utc).isoformat()
         (run_dir / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     return run_dir, report
+
+
+def _finalize_collection(run_dir: Path, report: dict) -> None:
+    """Package saved successes even when a later browser operation failed."""
+    selected = report["selected_documents"]
+    for document in selected[len(report["document_outcomes"]):]:
+        report["document_outcomes"].append({"document": document, "status": "not_attempted",
+                                            "reason": "Workflow stopped before this selection could be attempted"})
+    if report["downloaded_documents"]:
+        complete = (len(report["document_outcomes"]) == len(selected)
+                    and all(d["status"] == "downloaded" for d in report["document_outcomes"])
+                    and report["status"] != "failed")
+        report["stage"] = "create_archive"
+        try:
+            report["archive"] = create_delivery_archive(run_dir, report["downloaded_documents"], {
+                "schema_version": 1,
+                "status": "complete" if complete else "partial",
+                "collection_request": report["collection_request"],
+                "selected_documents": selected,
+                "matter_metadata": report["matter_metadata"],
+                "category_counts": report["category_counts"],
+                "total_document_count": report["total_document_count"],
+                "downloaded_document_count": report["downloaded_document_count"],
+                "document_outcomes": report["document_outcomes"],
+                "workflow_error": report.get("error"),
+            })
+            report["collection_complete"] = complete
+            report["status"] = "collection_complete" if complete else "collection_partial"
+        except Exception as exc:
+            if report.get("error"):
+                report["workflow_error"] = report["error"]
+            report["status"] = "failed"
+            report["error"] = {"type": type(exc).__name__, "message": str(exc)}
+    elif report["status"] != "failed":
+        report["stage"] = "collect_documents"
+        if not selected:
+            report["status"] = "collection_empty"
+        else:
+            report["status"] = "failed"
+            report["error"] = {"type": "CollectionError", "message": "No selected document was successfully downloaded; see document_outcomes"}
 
 
 async def _search_matter(page, matter_number: str, report: dict):
@@ -315,33 +376,7 @@ async def _download_one_other_document(page, detail, report: dict, run_dir: Path
     }
     report["download_candidate"] = candidate
 
-    report["stage"] = "prepare_download"
-    await row.get_by_role("button", name="GO GET IT", exact=True).click()
-    dialog = page.get_by_role("dialog", name="Download Files", exact=True)
-    await dialog.wait_for(state="visible")
-    filename_button = dialog.get_by_role("button").and_(page.locator(".fm-download-button"))
-    await expect(filename_button).to_have_count(1, timeout=timeout_ms)
-    await expect(filename_button).to_have_text(re.compile(r"\S"), timeout=timeout_ms, use_inner_text=True)
-    candidate["displayed_filename"] = (await filename_button.inner_text()).strip()
-
-    report["stage"] = "download_document"
-    # GO GET IT prepares a dialog; only its filename button emits the download.
-    async with page.expect_download(timeout=timeout_ms) as pending:
-        await filename_button.click()
-    download = await pending.value
-    if not allowed_url(download.url):
-        raise ValueError("Download URL is outside the permitted UARB origin")
-    candidate["suggested_filename"] = download.suggested_filename
-    destination = safe_download_path(run_dir / "downloads", download.suggested_filename)
-    candidate["path"] = destination.relative_to(run_dir.resolve()).as_posix()
-    # save_as waits for completion; persist before context closure deletes temps.
-    await asyncio.wait_for(download.save_as(destination), timeout=timeout_ms / 1000)
-
-    report["stage"] = "validate_download"
-    evidence = validate_download(destination).to_dict()
-    candidate["file_evidence"] = evidence
-    if not evidence["format_validated"]:
-        raise ValueError("Document persisted, but its file format is not validated")
+    await download_row(page, row, candidate, run_dir, report, timeout_ms, allowed_url)
     report["downloaded_documents"].append(dict(candidate))
     report["downloaded_document_count"] = len(report["downloaded_documents"])
     report["phase1_milestone_complete"] = True
