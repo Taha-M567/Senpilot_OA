@@ -14,6 +14,7 @@ class FileEvidence:
     size_bytes: int
     sha256: str
     validation: str
+    format_validated: bool
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -57,10 +58,12 @@ def validate_download(path: Path) -> FileEvidence:
     if normalized.startswith((b"<!doctype html", b"<html", b"<head", b"<body")):
         raise ValueError("Downloaded an HTML page instead of a document")
     validation = "nonempty; format not validated"
+    format_validated = False
     if path.suffix.lower() == ".pdf":
         if not header.startswith(b"%PDF-") or b"%%EOF" not in tail:
             raise ValueError("PDF signature or end marker is missing")
         validation = "PDF signature and end marker checked; not fully parsed"
+        format_validated = True
     elif path.suffix.lower() in {".zip", ".docx", ".xlsx", ".pptx"}:
         try:
             with zipfile.ZipFile(path) as archive:
@@ -69,4 +72,5 @@ def validate_download(path: Path) -> FileEvidence:
         except zipfile.BadZipFile as exc:
             raise ValueError("Download is not a valid ZIP container") from exc
         validation = "ZIP container CRC checked"
-    return FileEvidence(path.name, size, checksum, validation)
+        format_validated = True
+    return FileEvidence(path.name, size, checksum, validation, format_validated)

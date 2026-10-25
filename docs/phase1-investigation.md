@@ -154,9 +154,81 @@ environment. An earlier run had one Playwright trace-export error; that case
 passed individually, and the subsequent full suite passed without source changes
 during execution. No automatic application retry was introduced.
 
-## Remaining website behavior
+## One document persisted and validated - 2026-10-25 UTC
 
-Category tab behavior and Go Get It download/popup behavior remain unimplemented.
-The next milestone persists and validates one real download. Pagination and
-all-category support follow the one-file path. ZIP creation and email integration
-remain deferred.
+The continuation checkout is at `H:\Hard_Repos\Senpilot_OA`, at the same starting
+commit `813f96a`, rather than the earlier machine's path. No AGENTS.md was found.
+The assignment PDF was read locally again before source changes. This machine
+had no project environment/cache; `.venv` was rebuilt with the available Python
+3.14.2, Playwright 1.64.1, and pytest 9.1.1. Dependency/browser downloads and live
+UARB connections required explicit sandbox escalation. No application network
+restrictions or TLS checks were relaxed. The PDF reader installed for assignment
+and downloaded-document inspection is not a project dependency.
+
+The existing 64-test suite passed before implementation. Live observation then
+established the following, with evidence in ignored
+`artifacts/download-observation/`:
+
+- Clicking Other Documents opens a new FileMaker list layout. Its selected tab
+  has `.fm-selected`, and `.iwps_header .fm_object_213` displays `Found Count: 43`.
+- The document grid has `role=grid`, with repeated `role=row` records. Within a
+  row, `.fm_object_201 .text` is the document number and `.fm_object_202 .text` is
+  the title. The action's accessible name is uppercase `GO GET IT`.
+- `GO GET IT` opens a dialog named **Download Files**. It does not itself emit a
+  download, popup, or navigation event. A first inspection timed out because the
+  accessible name was initially assumed to use title case; captured DOM/text
+  resolved that assumption.
+- The dialog's `.fm-download-button` has `role=button` and the filename as its
+  label. Clicking it emits a normal Playwright download on the original page,
+  from the existing permitted `uarb.novascotia.ca` host.
+
+`--download-one` now connects that sequence to the existing file helpers. It
+requires `--matter`, retrieves the first Other Documents row in the site's
+current order, saves before browser closure, and records matter/category/row
+association and file evidence. Selected-tab and found-count checks precede row
+selection. Ambiguous grids/dialog file buttons fail. The download event and
+save completion are bounded by the configured timeout. No retries were added.
+
+The fresh production-command run at
+`artifacts/20261025T001433Z_727e26ef/` exited 0 with:
+
+- `status: document_downloaded`, `stage: validate_download`.
+- `verified_matter_number: M12205`, `metadata_counts_complete: true`.
+- Counts 13 Exhibits, 6 Key Documents, 43 Other Documents, 0 Transcripts,
+  0 Recordings; total 62. These are historical observations, not defaults.
+- Document 102674, title **Board Order**, dialog/suggested filename `102674.pdf`.
+- Persisted path `downloads/4e94b912884648ba8a40b4ec284e3cc3_102674.pdf`.
+- Size **170,571 bytes**; SHA-256
+  `6a3b3b90596df09605d7a978caf32d7bdbefb4f0b68648388733c2376d45757f`.
+- Basic PDF signature/end-marker validation passed; one validated file;
+  `phase1_milestone_complete: true`.
+- No blocked origins or capture errors. Chromium recorded one
+  `net::ERR_ABORTED` on the allowed host as the file navigation became an
+  attachment; the diagnostic is retained instead of suppressing aborted requests.
+
+After browser closure the saved bytes were independently rehashed and compared
+with the report. An optional local PDF-reader inspection read two pages, with
+`ORDER M12205` and the Halifax Regional Water Commission application on page 1.
+The saved screenshot was also reviewed against the report and row metadata.
+The production validator still performs basic format checks rather than parsing
+PDF content or proving semantic correctness.
+
+Offline fixtures reproduce delayed category readiness, two document rows,
+an unrelated GO GET IT action, and the intermediate filename dialog. Attachment
+responses are fulfilled locally by Playwright; the tests do not contact UARB.
+Tests cover persistence after context closure, checksum/association, zero files,
+wrong selected tab/count, ambiguous grids/filename buttons, missing row data or
+dialog, download timeout, failed save, empty/HTML/truncated files, and unknown
+formats. Unknown formats retain evidence with `format_validated: false` and do
+not complete the milestone. Earlier metadata-only behavior remains covered.
+The final full suite passed **81 tests on Python 3.14.2**, and `git diff --check`
+passed. Initial new-test failures expected no failed requests on successful
+attachments; their assertions were corrected to account for Chromium's observed
+navigation-to-download `ERR_ABORTED` diagnostic. No such diagnostics were hidden
+in the application.
+
+## Remaining work
+
+Expand retrieval to up to 10 documents, inspect virtual scrolling/pagination,
+and verify each of the other four category layouts. Then add ZIP creation,
+email intake, and email delivery as separate verifiable stages.

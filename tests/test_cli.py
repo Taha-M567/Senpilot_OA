@@ -69,3 +69,33 @@ def test_cli_prints_metadata_counts_and_total(tmp_path, monkeypatch, capsys):
                  'Key Documents: 4', 'Other Documents: 7', 'Transcripts: 0', 'Recordings: 0',
                  'Total documents: 13', 'download remains unverified'):
         assert text in output
+
+
+def test_download_flag_requires_matter_before_launch(monkeypatch, capsys):
+    monkeypatch.setattr(sys, 'argv', ['senpilot-probe', '--download-one'])
+    monkeypatch.setattr(cli, 'inspect_site', lambda *a, **k: pytest.fail('Unexpected browser launch'))
+    with pytest.raises(SystemExit) as error:
+        cli.main()
+    assert error.value.code == 2
+    assert '--download-one requires --matter' in capsys.readouterr().err
+
+
+def test_cli_passes_download_request_and_prints_saved_file(tmp_path, monkeypatch, capsys):
+    async def inspect(output, **kwargs):
+        assert kwargs['matter_number'] == 'M12205'
+        assert kwargs['download_one'] is True
+        return tmp_path, {
+            'status': 'document_downloaded', 'stage': 'validate_download',
+            'verified_matter_number': 'M12205', 'metadata_counts_complete': True,
+            'matter_metadata': {}, 'category_counts': {}, 'total_document_count': 7,
+            'phase1_milestone_complete': True, 'downloaded_document_count': 1,
+            'downloaded_documents': [{'path': 'downloads/fixture.pdf'}],
+        }
+
+    monkeypatch.setattr(cli, 'inspect_site', inspect)
+    monkeypatch.setattr(sys, 'argv', ['senpilot-probe', '--matter', 'M12205', '--download-one'])
+    assert cli.main() == 0
+    output = capsys.readouterr().out
+    assert 'Downloaded and validated: 1 Other Documents file(s)' in output
+    assert str(tmp_path / 'downloads/fixture.pdf') in output
+    assert 'remains unverified' not in output

@@ -26,6 +26,7 @@ def test_pdf_basic_validation_and_checksum(tmp_path):
     assert evidence.sha256 == hashlib.sha256(payload).hexdigest()
     assert evidence.size_bytes == len(payload)
     assert "not fully parsed" in evidence.validation
+    assert evidence.format_validated is True
 
 
 @pytest.mark.parametrize("payload", [b"", b"error", b"%PDF-1.7\ntruncated", b"<html>error</html>", b"\xef\xbb\xbf <!DOCTYPE html>error"])
@@ -44,7 +45,9 @@ def test_missing_file_rejected(tmp_path):
 def test_unknown_format_is_explicitly_unvalidated(tmp_path):
     path = tmp_path / "recording.mp3"
     path.write_bytes(b"unrecognized recording bytes")
-    assert validate_download(path).validation == "nonempty; format not validated"
+    evidence = validate_download(path)
+    assert evidence.validation == "nonempty; format not validated"
+    assert evidence.format_validated is False
 
 
 def test_zip_container_integrity(tmp_path):

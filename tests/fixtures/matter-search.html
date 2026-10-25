@@ -82,6 +82,48 @@ document.querySelector('.fm_object_258 button').addEventListener('click', () => 
     if (mode === 'malformed_count') other.textContent = 'Other Documents - many';
     if (mode === 'negative_count') other.textContent = 'Other Documents - -1';
     if (mode === 'count_timeout') other.textContent = 'Other Documents - ';
+    other.addEventListener('click', showDocuments);
   }, 160);
 });
+
+function showDocuments() {
+  // Observed Other Documents layout: selected category, list count, grid rows.
+  const label = mode === 'wrong_selected_tab' ? 'Exhibits - 2' : 'Other Documents - 7';
+  setTimeout(() => {
+    body.innerHTML = `<div class="fm-selected"><button>${label}</button></div>` +
+      `<div class="iwps_header"><div class="fm_object_213">Found Count: ${mode === 'wrong_list_count' ? 2 : 7}</div></div>` +
+      '<button>GO GET IT</button>' + // Unrelated action outside the document grid.
+      '<table role="grid"><tbody class="v-grid-body">' +
+      [123456, 987654].map((number, index) => `<tr role="row" class="v-grid-row"><td role="gridcell">
+        <div class="fm_object_201"><div class="text">${mode === 'missing_document_number' ? '' : number}</div></div>
+        <div class="fm_object_202"><div class="text">Fixture ${index ? 'second' : 'first'} document</div></div>
+        <button onclick="prepareDownload()">GO GET IT</button>
+      </td></tr>`).join('') + '</tbody></table>';
+    if (mode === 'ambiguous_grid') body.append(body.querySelector('table').cloneNode(true));
+  }, 40);
+}
+
+function prepareDownload() {
+  if (mode === 'missing_dialog') return;
+  setTimeout(() => {
+    const dialog = document.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-label', 'Download Files');
+    const filename = ({html_download: 'html.pdf', empty_download: 'empty.pdf',
+      truncated_download: 'truncated.pdf', unknown_download: 'unknown.mp3'})[mode] || '123456.pdf';
+    dialog.innerHTML = '<div>Download Files</div><div>Your files are ready for download. Please click the button to download each file:</div>' +
+      `<div class="fm-download-button" role="button" tabindex="0">${filename}</div><button>Close</button>`;
+    dialog.querySelector('.fm-download-button').onclick = () => {
+      if (mode === 'download_timeout') return;
+      const anchor = document.createElement('a');
+      anchor.href = 'https://uarb.novascotia.ca/fixture/' + filename;
+      anchor.download = filename;
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+    };
+    if (mode === 'ambiguous_filename') dialog.append(dialog.querySelector('.fm-download-button').cloneNode(true));
+    document.body.append(dialog);
+  }, 40);
+}
 </script>

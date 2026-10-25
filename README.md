@@ -1,19 +1,19 @@
 # Senpilot Regulatory Document AI Agent
 
-Phase 1 is **in progress; verified matter metadata and category counts work**.
-This repository provides a Playwright inspection/details command and offline
-tests. It does **not** yet download a UARB document.
+The **Phase 1 milestone is verified**: live matter metadata, all five category
+counts, and one persisted, validated **Other Documents** download. The broader
+assignment remains in progress: collecting up to 10 files, other categories,
+ZIP creation, and email intake/delivery are still pending.
 
-The target milestone is to retrieve live metadata and all five category counts
-for `M12205`, then download and validate one file from **Other Documents**. Values
-in the assignment PDF are examples, never application defaults.
+Values in the assignment PDF are examples, never application defaults. The
+command has no default matter number and downloads only when explicitly asked.
 
 ## Structure and dependencies
 
 ```text
 src/senpilot_agent/
-  cli.py       # Standalone inspection and matter-details command
-  probe.py     # Async Playwright search, metadata/count extraction, and evidence
+  cli.py       # Inspection, matter-details, and one-document command
+  probe.py     # Async Playwright search, extraction, download, and evidence
   files.py     # Safe filenames, basic format checks, SHA-256
 tests/         # Offline tests; no requests to the public site
 docs/          # Assignment and investigation notes
@@ -28,12 +28,12 @@ them for a browser feasibility check.
 
 ## Setup on this Windows machine
 
-Run from `C:\Users\taham\Repos\Senpilot_OA` in PowerShell:
+Run from the repository root in PowerShell:
 
 ```powershell
-# Python 3.12 was found here; substitute your own 3.12+ executable elsewhere.
-uv venv --python C:\Python312\python.exe .venv --cache-dir .cache/uv
-uv pip install --python .venv\Scripts\python.exe --cache-dir .cache/uv -e ".[dev]"
+# Substitute the path to your Python 3.12+ executable.
+& 'C:\Path\To\Python\python.exe' -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --cache-dir .cache/pip -e ".[dev]"
 
 # Keep the browser installation inside this workspace.
 $env:PLAYWRIGHT_BROWSERS_PATH = "$PWD\.cache\ms-playwright"
@@ -86,7 +86,26 @@ of being interpreted as blank values.
 Each of the five document-category buttons is read independently. Counts must
 be nonnegative integers; explicit zero counts are valid, but missing, ambiguous,
 or malformed counts fail. Their sum is the total across those five categories.
-No category tab is opened and no document is downloaded during this step.
+Without `--download-one`, extraction ends here.
+
+To also save the first Other Documents file in the site's current display order:
+
+```powershell
+$env:PLAYWRIGHT_BROWSERS_PATH = "$PWD\.cache\ms-playwright"
+.\.venv\Scripts\senpilot-probe.exe --matter M12205 --download-one
+```
+
+The command opens Other Documents, verifies its selected tab and found count,
+and reads the first document row's number and title. `GO GET IT` opens a
+**Download Files** dialog; the filename button inside that dialog triggers the
+actual download. The command begins waiting before that second click, saves via
+the safe-filename helper into the run's `downloads/` directory, and validates the
+file before browser closure. No new download host was needed.
+
+Zero Other Documents, ambiguous controls, missing dialogs, download/save
+failures, and invalid files produce failure reports. An unfamiliar format is
+saved with evidence but fails this validation milestone. There are no retries.
+This flag retrieves one file from Other Documents only; it does not create a ZIP.
 
 Each invocation creates a unique directory under `artifacts/` with `report.json`.
 When browser startup/navigation succeeds, it also attempts to save:
@@ -109,24 +128,39 @@ and counts were captured. The report records `intended_request.matter_number`,
   Documents, Transcripts, and Recordings.
 - `total_document_count`: their sum; `null` until every count has been validated.
 - `metadata_counts_complete`: true only after both extraction steps succeed.
+- `download_candidate`: selected matter/category, document number/title, dialog
+  filename, suggested filename, and relative saved path as they become known.
+- `downloaded_documents`: validated files with those associations plus filename,
+  size, SHA-256, validation description, and `format_validated`.
+- `downloaded_document_count`: number of persisted files that passed validation.
+
+`document_downloaded` and exit code 0 mean the one-file workflow succeeded.
+`phase1_milestone_complete` becomes true only after metadata/count extraction
+and file persistence/validation succeed. It remains false for metadata-only
+runs. A later download failure retains the verified matter, metadata, counts,
+and any candidate/path evidence; failed or unvalidated files are not counted.
 
 `inspection_captured` and exit code 0 mean inspection completed without a search.
 `failed` exits with code 1 and records the error and stage, including
 `locate_matter_field`, `submit_matter_search`, `verify_matter`, `extract_metadata`,
-or `extract_category_counts`. A verified identifier remains available if later
-extraction fails; completed metadata is also retained if count extraction fails.
+`extract_category_counts`, `open_category`, `select_document`, `prepare_download`,
+`download_document`, or `validate_download`. A verified identifier remains
+available if later extraction fails; completed metadata is also retained if
+count extraction fails.
 Failure evidence uses the same directory structure.
 
-`phase1_milestone_complete` remains false because a persisted, validated download
-is still pending. `--timeout-ms 60000` changes bounded browser/element
-timeouts. `--inspect-seconds` adds an optional debugging pause **after** the
-requested workflow succeeds; it is not an application readiness condition.
+`--timeout-ms 60000` changes bounded browser/element/download timeouts, including
+the wait for file persistence. `--inspect-seconds` adds an optional debugging
+pause **after** the requested workflow succeeds; it is not an application
+readiness condition.
 
 Only HTTPS/WSS on `uarb.novascotia.ca:443` is permitted. Other origins are blocked
 and recorded. If live inspection establishes a required resource host, review it
 and add that exact host deliberately. Do not disable TLS verification to bypass
 a browser certificate error. Artifacts can contain session identifiers and are
-excluded from Git.
+excluded from Git. Chromium can report `net::ERR_ABORTED` when a navigation
+becomes an attachment; this raw diagnostic is retained in `failed_requests` even
+when saving and validation succeed.
 
 ## Confirmed results and remaining work
 
@@ -140,17 +174,19 @@ used. A site layout change may require updating those selectors.
 
 Metadata and all five category counts were also verified in a fresh live M12205
 run, with structured output compared against the saved page text and screenshot.
-The next milestone is one persisted and validated download. Selecting Other
-Documents and the first Go Get It action still needs investigation: whether it
-emits a download event, opens a popup, or navigates to a file remains unknown.
-ZIP creation and email integration remain deferred.
+A fresh live `--download-one` run also saved document 102674, **Board Order**, as
+a 170,571-byte PDF and verified its checksum after browser closure. See the
+investigation notes for the historical evidence; future runs use live data.
 
 The offline browser fixtures reproduce the observed styled-div activation,
 Tab commit, three Search controls, asynchronous detail data, and no-result
-feedback, followed by delayed metadata and category-count updates. They cover
+feedback, followed by delayed metadata and category-count updates. They also
+reproduce the observed category/grid/dialog flow and fulfill attachment
+responses locally in Chromium without contacting UARB. They cover
 success, zero counts, blank optional fields, malformed/missing counts, missing or
-ambiguous widgets, and workflow timeouts without contacting UARB.
+ambiguous widgets, workflow timeouts, failed saves, and invalid downloads.
 Install Chromium as above before running the complete suite.
+The latest complete offline run passed **81 tests on Python 3.14.2**.
 
 The existing validator rejects empty files, HTML error responses, basic malformed
 PDFs, and corrupt ZIP containers, and calculates SHA-256. A PDF header/end marker

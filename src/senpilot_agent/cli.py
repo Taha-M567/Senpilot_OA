@@ -21,6 +21,8 @@ def main() -> int:
         description="Inspect UARB or collect verified matter metadata and counts, saving evidence.",
     )
     parser.add_argument("--matter", type=matter_argument, help="Matter number, for example M12205")
+    parser.add_argument("--download-one", action="store_true",
+                        help="Save and validate the first Other Documents file (requires --matter)")
     parser.add_argument("--output", type=Path, default=Path("artifacts"))
     parser.add_argument("--headed", action="store_true", help="Show the browser for debugging")
     parser.add_argument("--channel", choices=["chrome", "msedge"], help="Use installed Chrome or Edge")
@@ -28,6 +30,8 @@ def main() -> int:
     parser.add_argument("--inspect-seconds", type=int, default=0,
                         help="Debugging pause after inspection or search completes (maximum 60 seconds)")
     args = parser.parse_args()
+    if args.download_one and args.matter is None:
+        parser.error("--download-one requires --matter")
     if not 1000 <= args.timeout_ms <= 120_000:
         parser.error("--timeout-ms must be between 1000 and 120000")
     if not 0 <= args.inspect_seconds <= 60:
@@ -36,6 +40,7 @@ def main() -> int:
         args.output, headed=args.headed, channel=args.channel,
         timeout_ms=args.timeout_ms, inspect_seconds=args.inspect_seconds,
         matter_number=args.matter,
+        download_one=args.download_one,
     ))
     print(f"Status: {report['status']}; stage: {report['stage']}")
     print(f"Evidence: {directory.resolve() / 'report.json'}")
@@ -47,7 +52,12 @@ def main() -> int:
         for category, count in report["category_counts"].items():
             print(f"{category}: {count}")
         print(f"Total documents: {report['total_document_count']}")
-        print("Metadata and category counts captured; download remains unverified.")
+        if report.get("phase1_milestone_complete"):
+            print(f"Downloaded and validated: {report['downloaded_document_count']} Other Documents file(s)")
+            for document in report["downloaded_documents"]:
+                print(f"Document: {directory.resolve() / document['path']}")
+        else:
+            print("Metadata and category counts captured; download remains unverified.")
     else:
         print("Metadata, category counts, and download remain unverified.")
     if report["status"] == "failed":

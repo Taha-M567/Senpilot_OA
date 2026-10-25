@@ -1,11 +1,14 @@
-"""Inspect UARB or collect verified matter metadata and counts, retaining evidence."""
+"""Inspect UARB, extract matter details, and optionally persist one document."""
 
+import asyncio
 from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
 from urllib.parse import urlsplit
 from uuid import uuid4
+
+from .files import safe_download_path, validate_download
 
 
 UARB_URL = "https://uarb.novascotia.ca/fmi/webd/UARB15"
@@ -30,6 +33,7 @@ async def inspect_site(
     output: Path, *, headed: bool = False, channel: str | None = None,
     timeout_ms: int = 30_000, inspect_seconds: int = 0,
     matter_number: str | None = None,
+    download_one: bool = False,
 ) -> tuple[Path, dict]:
     """Capture live DOM and controls, or a truthful failure report.
 
@@ -50,6 +54,9 @@ async def inspect_site(
         "total_document_count": None,
         "metadata_counts_complete": False,
         "phase1_milestone_complete": False,
+        "download_candidate": None,
+        "downloaded_documents": [],
+        "downloaded_document_count": 0,
         "status": "starting",
         "stage": "import_playwright",
         "blocked_origins": [],
@@ -59,6 +66,13 @@ async def inspect_site(
     browser = context = page = None
     tracing_started = False
     try:
+        report["stage"] = "validate_request"
+        if download_one:
+            report["intended_request"].update(document_category="Other Documents", download_limit=1)
+            if matter_number is None:
+                raise ValueError("Downloading requires a matter number")
+            report["purpose"] = "Download one Other Documents file after verifying matter details"
+        report["stage"] = "import_playwright"
         from playwright.async_api import async_playwright
 
         async with async_playwright() as playwright:
@@ -108,7 +122,7 @@ async def inspect_site(
                         "reason": request.failure,
                     })
 
-                page.on("requestfailed", request_failed)
+                context.on("requestfailed", request_failed)
                 report["stage"] = "navigate"
                 response = await page.goto(UARB_URL, wait_until="domcontentloaded")
                 report["http_status"] = response.status if response else None
@@ -124,9 +138,10 @@ async def inspect_site(
                 if matter_number is not None:
                     detail = await _search_matter(page, matter_number, report)
                     await _extract_matter_details(detail, report, timeout_ms)
+                    if download_one:
+                        await _download_one_other_document(page, detail, report, run_dir, timeout_ms)
                 if inspect_seconds:
                     # Explicit human inspection window, not a readiness heuristic.
-                    import asyncio
                     await asyncio.sleep(inspect_seconds)
                 report["title"] = await page.title()
                 report["frames"] = []
@@ -147,8 +162,12 @@ async def inspect_site(
                         await frame.content(), encoding="utf-8",
                     )
                     report["frames"].append({"index": index, "controls": controls})
-                report["status"] = "matter_found" if matter_number is not None else "inspection_captured"
-                report["stage"] = "extract_category_counts" if matter_number is not None else "inspect_dom"
+                report["status"] = (
+                    "document_downloaded" if download_one else
+                    "matter_found" if matter_number is not None else "inspection_captured"
+                )
+                if matter_number is None:
+                    report["stage"] = "inspect_dom"
             finally:
                 if page is not None:
                     try:
@@ -255,3 +274,74 @@ async def _extract_matter_details(detail, report: dict, timeout_ms: int) -> None
     report["category_counts"] = counts
     report["total_document_count"] = sum(counts.values())
     report["metadata_counts_complete"] = True
+
+
+async def _download_one_other_document(page, detail, report: dict, run_dir: Path, timeout_ms: int) -> None:
+    """Follow the observed category -> GO GET IT -> filename dialog workflow.
+
+    The first row means the site's current display order, without changing its
+    sort. This milestone deliberately retrieves one file from Other Documents.
+    """
+    from playwright.async_api import expect
+
+    category = "Other Documents"
+    count = report["category_counts"][category]
+    report["stage"] = "open_category"
+    if count == 0:
+        raise ValueError("Other Documents has no documents to download")
+    label = re.compile(rf"^{category}\s*-\s*{count}\s*$")
+    await detail.locator(".fm_object_276").get_by_role("button", name=label).click()
+    # The list is a new FileMaker layout. Confirm both its selected tab and count
+    # before using rows; stale rows from another category must not be collected.
+    await page.locator(".fm-selected").get_by_role("button", name=label).wait_for(state="visible")
+    await expect(page.locator(".iwps_header .fm_object_213")).to_have_text(
+        re.compile(rf"^Found Count:\s*{count}\s*$"), timeout=timeout_ms, use_inner_text=True,
+    )
+
+    report["stage"] = "select_document"
+    action = page.get_by_role("button", name="GO GET IT", exact=True)
+    grid = page.get_by_role("grid").filter(has=action)
+    await expect(grid).to_have_count(1, timeout=timeout_ms)
+    row = grid.get_by_role("row").filter(has=action).first
+    number = row.locator(".fm_object_201 .text")
+    title = row.locator(".fm_object_202 .text")
+    await expect(number).to_have_text(re.compile(r"^[0-9]+\s*$"), timeout=timeout_ms, use_inner_text=True)
+    await expect(title).to_have_text(re.compile(r"\S"), timeout=timeout_ms, use_inner_text=True)
+    candidate = {
+        "matter_number": report["verified_matter_number"],
+        "document_category": category,
+        "document_number": (await number.inner_text()).strip(),
+        "title": (await title.inner_text()).strip(),
+    }
+    report["download_candidate"] = candidate
+
+    report["stage"] = "prepare_download"
+    await row.get_by_role("button", name="GO GET IT", exact=True).click()
+    dialog = page.get_by_role("dialog", name="Download Files", exact=True)
+    await dialog.wait_for(state="visible")
+    filename_button = dialog.get_by_role("button").and_(page.locator(".fm-download-button"))
+    await expect(filename_button).to_have_count(1, timeout=timeout_ms)
+    await expect(filename_button).to_have_text(re.compile(r"\S"), timeout=timeout_ms, use_inner_text=True)
+    candidate["displayed_filename"] = (await filename_button.inner_text()).strip()
+
+    report["stage"] = "download_document"
+    # GO GET IT prepares a dialog; only its filename button emits the download.
+    async with page.expect_download(timeout=timeout_ms) as pending:
+        await filename_button.click()
+    download = await pending.value
+    if not allowed_url(download.url):
+        raise ValueError("Download URL is outside the permitted UARB origin")
+    candidate["suggested_filename"] = download.suggested_filename
+    destination = safe_download_path(run_dir / "downloads", download.suggested_filename)
+    candidate["path"] = destination.relative_to(run_dir.resolve()).as_posix()
+    # save_as waits for completion; persist before context closure deletes temps.
+    await asyncio.wait_for(download.save_as(destination), timeout=timeout_ms / 1000)
+
+    report["stage"] = "validate_download"
+    evidence = validate_download(destination).to_dict()
+    candidate["file_evidence"] = evidence
+    if not evidence["format_validated"]:
+        raise ValueError("Document persisted, but its file format is not validated")
+    report["downloaded_documents"].append(dict(candidate))
+    report["downloaded_document_count"] = len(report["downloaded_documents"])
+    report["phase1_milestone_complete"] = True
