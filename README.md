@@ -1,5 +1,9 @@
 # Senpilot Regulatory Document AI Agent
 
+For continuation from another machine or chat, read the
+[chat handoff](docs/chat-handoff.md) for decisions, current state, and remaining
+acceptance checks.
+
 The agent accepts a local JSON file containing **email subject/body text**,
 verifies its matter, catalogs the five document categories, and makes one logical
 LLM request to select up to **10 documents**. It downloads those selections and
