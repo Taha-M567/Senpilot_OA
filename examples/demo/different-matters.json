@@ -1,0 +1,12 @@
+{
+  "emails": {
+    "earlier_water_project": {
+      "subject": "M11999 - earlier project approval",
+      "content": "Hi Agent, please recommend one document from Key Documents for M11999. Prioritize the approval decision. I only need its title, displayed date, category, and a metadata-based selection reason; no downloads or content review."
+    },
+    "municipal_boundary": {
+      "subject": "M12383 - municipal boundary decision trail",
+      "content": "Hi Agent, for M12383, recommend up to two Key Documents dated between July 10 and November 28, 2025, inclusive. Put the newest displayed date first. Use titles and metadata only; do not download or review document contents."
+    }
+  }
+}

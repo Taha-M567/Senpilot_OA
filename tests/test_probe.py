@@ -91,7 +91,9 @@ def test_offline_search_and_failure_evidence(mode, stage, error, offline_site, t
     assert report['failed_requests'] == []
     assert report['blocked_origins'] == []
     assert json.loads((directory / 'report.json').read_text()) == report
-    for filename in ('page.png', 'page.html', 'page.txt', 'trace.zip'):
+    assert not list(directory.glob('*.html'))
+    assert not list(directory.glob('*.png'))
+    for filename in ('page.txt', 'trace.zip'):
         assert (directory / filename).stat().st_size > 0
     if error is None:
         assert report['status'] == 'matter_found'
@@ -135,6 +137,8 @@ def test_offline_inspection_does_not_search(offline_site, tmp_path):
     assert report['metadata_counts_complete'] is False
     assert report['matter_metadata'] == report['category_counts'] == {}
     assert report['total_document_count'] is None
+    assert not list(directory.glob('*.html'))
+    assert not list(directory.glob('*.png'))
     assert 'Go Directly to Matter' in (directory / 'page.txt').read_text()
 
 

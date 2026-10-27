@@ -493,3 +493,18 @@ def test_prompt_upgrade_reuses_files_and_extraction_but_rebuilds_content_review(
     assert parse.await_count == 2
     assert second['archive'] == first['archive']
     review.inspect_site.assert_not_called()
+
+
+def test_download_only_processing_never_extracts_or_calls_model(workflow, monkeypatch):
+    directory, plan, browser, client, parse = workflow
+    extract = AsyncMock(side_effect=AssertionError('Download-only must not extract PDF text'))
+    monkeypatch.setattr(review, 'extract_document', extract)
+    report = asyncio.run(review.review_selected(directory, plan, None, planner._structured_call, review_content=False))
+    assert report['status'] == 'completed'
+    assert report['review_enabled'] is False
+    assert report['downloaded_count'] == 2 and report['reviewed_count'] == report['failed_count'] == 0
+    assert all(x['status'] == 'downloaded' and x['review'] is None for x in report['documents'])
+    assert report['archive']['document_count'] == 2
+    assert 'Selected document downloads' in (directory/'review.md').read_text()
+    parse.assert_not_called()
+    extract.assert_not_called()

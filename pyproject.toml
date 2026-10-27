@@ -13,7 +13,6 @@ dependencies = ["playwright>=1.50,<2", "openai>=2,<3", "pydantic>=2,<3", "python
 dev = ["pytest>=8,<10"]
 
 [project.scripts]
-senpilot-probe = "senpilot_agent.cli:main"
 senpilot-plan = "senpilot_agent.plan_cli:main"
 
 [tool.hatch.build.targets.wheel]

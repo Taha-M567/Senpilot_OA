@@ -338,7 +338,7 @@ def test_review_end_to_end_exact_downloads_real_extraction_and_mocked_reviews(ll
 
     llm.side_effect = parse
     directory, report = asyncio.run(planner.plan_email('Download and review priority documents for M12205.',
-        tmp_path, review=True, timeout_ms=2000))
+        tmp_path, timeout_ms=2000))
     assert report['status'] == 'completed', report
     assert report['downloaded_count'] == report['reviewed_count'] == 2
     assert [item['document_number'] for item in report['documents']] == ['1012', 'H-1']
@@ -403,11 +403,117 @@ def test_review_setup_never_falls_back_to_an_openai_key_and_preserves_selection(
 
 def test_metadata_only_mode_clarifies_content_questions_before_browser(llm, browser, tmp_path):
     llm.return_value = response(interpretation(review_questions=['What did the Board decide?']))
-    _, report = asyncio.run(planner.plan_email('What did the Board decide in M12205?', tmp_path))
+    _, report = asyncio.run(planner.plan_email('What did the Board decide in M12205?', tmp_path, review=False))
     assert report['status'] == 'clarification'
-    assert '--review' in report['clarification_question']
+    assert 'metadata' in report['clarification_question']
     browser[0].assert_not_called()
     assert llm.await_count == 1
+
+
+@pytest.mark.parametrize(('settings', 'override', 'expected'), [
+    ({}, None, None),
+    ({'download_requested': True}, None, False),
+    ({'review_requested': True}, None, True),
+    ({'review_questions': ['What conditions were imposed?']}, None, True),
+    ({}, True, True),
+])
+def test_first_call_selects_email_actions_and_count(llm, browser, tmp_path, monkeypatch, settings, override, expected):
+    llm.side_effect = [response(interpretation(requested_count=1, **settings)), response(planner.Ranking(
+        selections=[planner.Selection(candidate_id='C0001', reason='Listed order')]))]
+    documents = AsyncMock(return_value={'status':'completed', 'documents':[], 'basis':'Document processing'})
+    monkeypatch.setattr(planner, '_review_plan', documents)
+    directory, _ = asyncio.run(planner.plan_email('M12205 request', tmp_path, review=override))
+    saved = json.loads((directory/'plan.json').read_text())
+    assert saved['result_limit'] == 1
+    assert llm.await_count == 2  # Routing needs no extra model call.
+    assert saved['download_enabled'] is (expected is not None)
+    assert saved['review_enabled'] is (expected is True)
+    if expected is None:
+        documents.assert_not_called()
+    else:
+        assert documents.call_args.kwargs['review_content'] is expected
+
+
+def test_download_only_email_builds_zip_without_content_review(llm, document_site, pdf_bytes, tmp_path):
+    import zipfile
+    document_site(pdf_bytes=pdf_bytes())
+    async def parse(**kwargs):
+        if kwargs['response_format'] is planner.EmailRequest:
+            return response(interpretation(requested_count=1, download_requested=True))
+        assert kwargs['response_format'] is planner.Ranking
+        inventory = json.loads(kwargs['messages'][1]['content'])['candidate_inventory']
+        return response(planner.Ranking(selections=[planner.Selection(
+            candidate_id=inventory[0]['candidate_id'], reason='Requested file')]))
+    llm.side_effect = parse
+    directory, report = asyncio.run(planner.plan_email(
+        'Download one document for M12205 as a ZIP. No content analysis.', tmp_path, timeout_ms=2000))
+    assert report['status'] == 'completed', report
+    assert report['review_enabled'] is False
+    assert report['downloaded_count'] == 1 and report['reviewed_count'] == report['failed_count'] == 0
+    assert report['documents'][0]['status'] == 'downloaded'
+    assert report['documents'][0]['extraction'] is report['documents'][0]['review'] is None
+    assert not list(directory.glob('extracted/*'))
+    assert 'contents were not reviewed' in report['basis']
+    assert llm.await_count == 2
+    with zipfile.ZipFile(directory/report['archive']['relative_path']) as archive:
+        assert len(archive.namelist()) == 1 and archive.testzip() is None
+    llm.reset_mock()
+    _, resumed = asyncio.run(planner.resume_email(directory, timeout_ms=2000))
+    assert resumed['status'] == 'completed' and resumed['review_enabled'] is False
+    assert resumed['documents'] == report['documents']
+    assert resumed['archive'] == report['archive']
+    llm.assert_not_called()
+
+
+def test_mixed_inbox_routes_each_email_independently(llm, browser, tmp_path, monkeypatch):
+    from senpilot_agent.email_flow import process_emails
+    mode_calls = []
+    async def parse(**kwargs):
+        payload = json.loads(kwargs['messages'][1]['content'])
+        if kwargs['response_format'] is planner.EmailRequest:
+            text = payload['email_text']
+            return response(interpretation(requested_count=1,
+                download_requested='download' in text, review_requested='analyse' in text))
+        return response(planner.Ranking(selections=[planner.Selection(candidate_id='C0001', reason='Listed record')]))
+    async def documents(directory, plan, **options):
+        mode_calls.append(options['review_content'])
+        return {'status':'completed', 'documents':[], 'basis':'Selected files'}
+    monkeypatch.setattr(planner, '_review_plan', documents)
+    llm.side_effect = parse
+    inbox = {'emails':{
+        'files':{'subject':'M12205 files','content':'Please download one file.'},
+        'analysis':{'subject':'M12205 analysis','content':'Please analyse one order.'},
+        'metadata':{'subject':'M12205 titles','content':'Recommend one title using metadata only.'}}}
+    _, replies, code = asyncio.run(process_emails(json.dumps(inbox), tmp_path))
+    assert code == 0 and list(replies['emails']) == list(inbox['emails'])
+    assert mode_calls == [False, True]
+    assert llm.await_count == 6
+
+
+def test_action_flags_are_strict_booleans(llm, browser, tmp_path):
+    bad = interpretation().model_dump()
+    bad['review_requested'] = 'true'
+    llm.return_value = response(bad)
+    _, report = asyncio.run(planner.plan_email('M12205', tmp_path))
+    assert report['status'] == 'failed'
+    assert llm.await_count == 1
+    browser[0].assert_not_called()
+
+
+def test_legacy_failed_review_checkpoint_retains_force_review_policy(llm, browser, tmp_path, monkeypatch):
+    llm.side_effect = [response(interpretation()), ValueError('Rank unavailable')]
+    directory, failed = asyncio.run(planner._plan_email('M12205', tmp_path, review=True))
+    assert failed['status'] == 'failed'
+    failed.pop('review_policy')
+    failed.pop('download_enabled')
+    failed['interpreted_request'].pop('download_requested')
+    failed['interpreted_request'].pop('review_requested')
+    (directory/'plan.json').write_text(json.dumps(failed))
+    handler = AsyncMock(return_value={'status':'completed', 'documents':[]})
+    monkeypatch.setattr(planner, '_review_plan', handler)
+    llm.side_effect = [response(planner.Ranking(selections=[]))]
+    asyncio.run(planner.resume_email(directory))
+    assert handler.call_args.kwargs['review_content'] is True
 
 
 def test_transient_sdk_errors_retry_with_diagnostics_and_retry_after(no_retry_waits):

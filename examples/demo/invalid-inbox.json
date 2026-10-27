@@ -1,0 +1,12 @@
+{
+  "emails": {
+    "otherwise_valid_first_email": {
+      "subject": "M12205 - valid message before invalid input",
+      "content": "Please recommend one Key Document for M12205 using metadata only."
+    },
+    "invalid_blank_body": {
+      "subject": "This invalid email must stop the whole inbox before processing",
+      "content": ""
+    }
+  }
+}

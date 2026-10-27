@@ -1,0 +1,8 @@
+{
+  "emails": {
+    "zip_without_analysis": {
+      "subject": "M12205 - one PDF as a ZIP, no analysis",
+      "content": "Hi Agent, download one Board Order, document 102674, from Key Documents for M12205 and put that PDF in a ZIP. Do not summarize or review its contents."
+    }
+  }
+}

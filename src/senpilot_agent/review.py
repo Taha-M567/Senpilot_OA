@@ -175,10 +175,10 @@ def save_review(directory: Path, report: dict) -> None:
     def escape(value):
         return re.sub(r'([\\`*_{}\[\]<>|])', r'\\\1', str(value)).replace('\n', ' ')
 
-    lines = ['# PDF text review', '', report['basis'], '',
+    lines = ['# PDF text review' if report.get('review_enabled', True) else '# Selected document downloads', '', report['basis'], '',
              f"Status: {report['status']}", '',
              f"Downloaded: {report['downloaded_count']}; reviewed: {report['reviewed_count']}; "
-             f"failed or unreviewed: {report['failed_count']}.", '',
+                          f"failed: {report['failed_count']}.", '',
              'Order below is the original metadata ranking. Content review does not rerank the shortlist.', '']
     if report.get('error'):
         lines.extend([escape(report['error']['message']), ''])
@@ -245,7 +245,8 @@ def saved_path(directory: Path, relative: str, subdirectory: str | None = None) 
 def checkpoint_review(directory: Path, report: dict) -> None:
     report['downloaded_count'] = sum(item['download'] is not None for item in report['documents'])
     report['reviewed_count'] = sum(item['status'] == 'reviewed' for item in report['documents'])
-    report['failed_count'] = len(report['documents']) - report['reviewed_count']
+    successful = report['reviewed_count'] if report.get('review_enabled', True) else report['downloaded_count']
+    report['failed_count'] = len(report['documents']) - successful
     write_json(directory / 'review.json', report)
 
 
@@ -332,9 +333,10 @@ def selected_archive(directory: Path, plan: dict, report: dict, paths: list[Path
 
 async def review_selected(directory: Path, plan: dict, client, structured_call, *,
                           headed=False, channel=None, timeout_ms=30_000, inspect_seconds=0,
-                          resume: bool = False) -> dict:
+                          resume: bool = False, review_content: bool = True) -> dict:
     report = {'status': 'starting', 'stage': 'retrieve_selected_documents',
-              'started_at': datetime.now(timezone.utc).isoformat(), 'basis': TEXT_SCOPE,
+              'started_at': datetime.now(timezone.utc).isoformat(), 'review_enabled': review_content,
+              'basis': TEXT_SCOPE if review_content else 'Selected files downloaded; document contents were not reviewed.',
               'provider': plan['provider'], 'model': plan['model'], 'prompt_version': REVIEW_PROMPT_VERSION,
               'planning_prompt_version': plan['prompt_version'], 'plan': 'plan.json',
               'interpreted_request': plan['interpreted_request'], 'matter_metadata': plan['matter_metadata'],
@@ -412,7 +414,7 @@ async def review_selected(directory: Path, plan: dict, client, structured_call, 
                 report['error'] = {'message': f"Browser retrieval failed at {browser['stage']}; see retrieval evidence"}
             pending = unattempted + retryable
         for item in report['documents']:
-            if item['status'] != 'downloaded':
+            if item['status'] != 'downloaded' or not review_content:
                 continue
             candidate_id = item['candidate_id']
             report['stage'] = 'extract_pdf_text'
@@ -468,7 +470,7 @@ async def review_selected(directory: Path, plan: dict, client, structured_call, 
         for item in report['documents']:
             if item['status'] == 'pending':
                 item.update(status='download_failed', error={'message': 'Retrieval did not complete'})
-            elif item['status'] == 'downloaded':
+            elif item['status'] == 'downloaded' and review_content:
                 item.update(status='unreviewed', error={'message': 'Content review did not complete'})
         paths = [directory / item['download']['relative_path'] for item in report['documents'] if item['download']]
         if paths:

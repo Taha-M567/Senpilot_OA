@@ -1,0 +1,12 @@
+{
+  "emails": {
+    "requested_count_exceeds_app_limit": {
+      "subject": "M12383 - fifteen requested, application ceiling applies",
+      "content": "Hi Agent, please recommend up to fifteen Key Documents for M12383, newest displayed date first. Use only metadata. Respect the application's configured result limit if it is lower than my requested count."
+    },
+    "future_date_no_matches": {
+      "subject": "M11999 - future-dated documents only",
+      "content": "Hi Agent, recommend up to two Key Documents for M11999 with a displayed date after January 1, 2099. This future cutoff is intentional. Use metadata only, and return no matches if none meet it rather than selecting older documents."
+    }
+  }
+}

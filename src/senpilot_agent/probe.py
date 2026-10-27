@@ -36,7 +36,7 @@ async def inspect_site(
     selected_records: list[dict] | None = None, download_directory: Path | None = None,
     restart_on_download_timeout: bool = False, download_callback=None,
 ) -> tuple[Path, dict]:
-    """Capture live DOM and controls, or a truthful failure report.
+    """Inspect live controls and save diagnostics, or a truthful failure report.
 
     Imports are lazy so a missing Playwright installation still produces a useful
     diagnostic. Only explicitly allowed UARB network requests are permitted.
@@ -191,9 +191,6 @@ async def inspect_site(
                         text: (el.innerText || '').trim().slice(0, 250),
                         visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
                     }))""")
-                    (run_dir / f"frame-{index}.html").write_text(
-                        await frame.content(), encoding="utf-8",
-                    )
                     report["frames"].append({"index": index, "controls": controls})
                 report["status"] = "matter_found" if matter_number is not None else "inspection_captured"
                 if category is not None:
@@ -210,9 +207,6 @@ async def inspect_site(
             finally:
                 if page is not None:
                     try:
-                        await page.screenshot(path=str(run_dir / "page.png"), full_page=True,
-                                              timeout=5000)
-                        (run_dir / "page.html").write_text(await page.content(), encoding="utf-8")
                         (run_dir / "page.txt").write_text(
                             await page.locator("body").inner_text(timeout=5000), encoding="utf-8",
                         )

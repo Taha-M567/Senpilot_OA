@@ -1,0 +1,8 @@
+{
+  "emails": {
+    "approved_cost_and_conditions": {
+      "subject": "M12205 - approved cost and reporting requirements",
+      "content": "Hi Agent, please search all five document categories for M12205 and retrieve only the Board Order numbered 102674. Review that one PDF: what total project cost did the Board approve, and what ongoing reporting did it require? Prepare a one-file ZIP with the response. If that exact document is unavailable, say so rather than substituting another order."
+    }
+  }
+}

@@ -1,9 +1,9 @@
 ﻿# Senpilot Regulatory Document AI Agent
 
-A Python CLI that interprets document requests, finds verified matters on the
+A Python agent that reads email requests from a local JSON inbox, finds verified matters on the
 [UARB website](https://uarb.novascotia.ca/fmi/webd/UARB15), recommends up to ten
-documents, and optionally downloads and reviews their PDF text. It also accepts
-a local JSON inbox and produces JSON replies. Mailbox integration and email
+documents, and optionally downloads and reviews their PDF text. It produces
+JSON replies. Mailbox integration and email
 delivery are not implemented.
 
 The requirements are in [the assignment PDF](docs/Co-op%20Technical%20Assignment%20-%20Winter%202027.pdf).
@@ -23,8 +23,8 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 
 Set `GEMINI_API_KEY` in `.env`. The optional `GEMINI_MODEL` defaults to
 `gemini-3.1-flash-lite`. Existing environment variables override `.env`, which
-is loaded from the current working directory and ignored by Git. Inspection and
-explicit category downloads work without an API key.
+is loaded from the current working directory and ignored by Git. JSON requests
+require the Gemini configuration for interpretation and ranking.
 
 Set `PLAYWRIGHT_BROWSERS_PATH` in each new terminal session. Alternatively, pass
 `--channel msedge` or `--channel chrome` to use an installed browser.
@@ -33,11 +33,11 @@ endpoint), Pydantic, python-dotenv, and pypdf. The development dependency is pyt
 
 ## Run the pipeline
 
-Process the [example inbox](examples/emails.json), downloading and reviewing up
-to three selected documents per email:
+Process the [example inbox](examples/emails.json). Each email determines its
+requested count and whether to recommend, download, or review documents:
 
 ```powershell
-.\.venv\Scripts\senpilot-plan.exe --emails-json examples/emails.json --review --limit 3
+.\.venv\Scripts\senpilot-plan.exe --emails-json examples/emails.json
 ```
 
 The JSON format is:
@@ -61,40 +61,49 @@ each completes, and a failed email does not prevent the next from running.
 Extra fields, duplicate keys, empty inboxes, and blank IDs/subjects/bodies are
 rejected before browser or AI work. Local paths serve as attachment references.
 
-For a single request, create a UTF-8 text file and run:
+Use the same JSON shape for a single email or a batch. The runner requires a
+UTF-8 JSON file; there are no plain-text, standard-input, or direct-matter modes.
 
-```powershell
-.\.venv\Scripts\senpilot-plan.exe --email-file request.txt --review --limit 3
-```
+The first model call extracts `requested_count`, `download_requested`, and
+`review_requested`, alongside the matter and document criteria. A request for
+files or a ZIP enables downloads; content questions or analysis enable PDF text
+review as well. Metadata-only emails do neither. Mixed inboxes can use all three
+paths independently, with no extra model call to choose the mode.
 
-Omit `--review` for recommendations based on titles and metadata only. Content
-questions require `--review`. Both input options accept `-` for standard input:
-
-```powershell
-Get-Content -Raw examples/emails.json | .\.venv\Scripts\senpilot-plan.exe --emails-json - --review
-```
-
-Both commands support `--output PATH`, `--headed`, `--channel chrome|msedge`,
+The JSON runner supports `--output PATH`, `--headed`, `--channel chrome|msedge`,
 `--timeout-ms 30000` (range 1000-120000), and `--inspect-seconds 0` (range 0-60).
-`--limit` is 1-10, defaulting to 10; the email's requested count also caps results.
+The email supplies the requested count, subject to the application's maximum of ten; an unspecified
+count defaults to ten. The model cannot raise this ceiling or select browser,
+timeout, output-path, or execution settings.
 Use one explicitly written matter number: `M` followed by five ASCII digits.
 Missing, multiple, contradictory, or unsupported requests return clarification.
+
+## Five-minute demo
+
+For a rehearsed presentation, see the [five-minute headed demo](examples/demo/README.md).
+It includes a one-PDF hero email, two other real matters, edge-case inboxes, and
+a presentation sequence that shows prepared results while a fresh visible-browser
+run proceeds. The email-driven hero rehearsal completed in 62.47 seconds on October 27, 2026;
+fresh live timing still depends on Gemini and UARB. Local prepared outputs, when
+present, are indexed in [the demo results](artifacts/demo/READY.md).
 
 ## How it works
 
 ```mermaid
 flowchart TD
-    Input[Email text or JSON inbox] --> Interpret[Gemini interprets the request]
+    Input[JSON inbox file] --> Interpret[Gemini interprets each email]
     Interpret --> Validate[Validate matter, categories, and limits]
     Validate --> Inventory[Playwright verifies the matter and collects the complete inventory]
     Inventory --> Rank[Gemini ranks real document IDs using titles and metadata]
     Rank --> Plan[Save plan.json]
-    Plan --> Review{Review enabled?}
-    Review -->|No| Reply[Return recommendations or JSON reply]
-    Review -->|Yes| Download[Fresh browser session downloads exact selected records]
-    Download --> Extract[Extract all readable PDF text with physical page numbers]
+    Plan --> Files{Email requested files or review?}
+    Files -->|No| Reply[Return recommendations or JSON reply]
+    Files -->|Yes| Download[Fresh browser session downloads exact selected records]
+    Download --> Review{Email requested content review?}
+    Review -->|No| Output[Save document report and selected-file ZIP]
+    Review -->|Yes| Extract[Extract all readable PDF text with physical page numbers]
     Extract --> Findings[Gemini reviews each eligible PDF; validate source citations]
-    Findings --> Output[Save review.json, review.md, and selected-file ZIP]
+    Findings --> Output
     Output --> Reply
 ```
 
@@ -105,7 +114,7 @@ for browser/API work; it does not make these steps parallel.
 
 | Module | Responsibility |
 |---|---|
-| `plan_cli.py` | Read text or JSON input, call the workflow, print output paths and exit status |
+| `plan_cli.py` | Read a JSON inbox file, call the workflow, print output paths and exit status |
 | `email_flow.py` | Validate the inbox, process each subject/body, format replies from existing results |
 | `planner.py` | Interpret and validate the request, collect inventory, rank candidates, save the plan, optionally start review |
 | `probe.py` | Start a restricted Playwright browser, search and verify the matter, read metadata/counts, dispatch listing or downloads, capture evidence |
@@ -114,7 +123,6 @@ for browser/API work; it does not make these steps parallel.
 | `files.py` | Safe filenames, basic format checks, SHA-256 checksums, checked ZIP creation |
 | `content.py` | Extract PDF text in a disposable process with bounded time and size |
 | `review.py` | Prepare source excerpts, call Gemini, validate citations, save reports and the selected-document ZIP |
-| `cli.py` | Standalone inspection, matter lookup, or category downloads through `senpilot-probe` |
 
 The browser verifies the returned read-only matter number, then reads metadata
 and counts for Exhibits, Key Documents, Other Documents, Transcripts, and
@@ -140,7 +148,7 @@ PDF extraction limits are 20 MiB, 100 pages, 100,000 extracted characters,
 corrupt, unsupported, over-limit, and partially unreadable files remain explicitly
 unreviewed. OCR, images, diagrams, and visual layout are outside the review scope.
 
-Each eligible PDF gets one logical Gemini review using excerpts covering all its extracted
+When review is requested, each eligible PDF gets one logical Gemini review using excerpts covering all its extracted
 text. The model cites stable source IDs; the application resolves them to local
 quotations and physical page numbers, then checks the evidence before publishing
 up to five findings. Citation checks establish traceability; human judgment is
@@ -161,19 +169,9 @@ matter and exact selected number/title/date again. Each file gets at most three
 attempts, with 5 seconds before the first recovery session and 15 seconds before
 subsequent sessions. Unattempted files go ahead of a stalled file, so one failed
 download cannot block the rest. Changed, missing, and ambiguous identities fail
-without retries or substitutes. The standalone `senpilot-probe` command retains
-its existing behavior.
-
-Resume a single workflow directory printed by the CLI:
-
-```powershell
-.\.venv\Scripts\senpilot-plan.exe --resume artifacts\RUN_DIRECTORY --timeout-ms 60000
-```
-
-Review mode is inferred from the saved workflow, or can be enabled with `--review`.
-Do not supply a new email or `--limit`: resume retains the original request,
-inventory, shortlist, and limit. Each resume provides another bounded recovery
-window. For a JSON inbox, resume an individual email's workflow directory.
+without retries or substitutes. Checkpoint resume remains an internal Python
+capability for integrations and controlled tests; it has no separate CLI command.
+It retains the original request, inventory, shortlist, count, and execution mode.
 
 Checkpoints are replaced atomically after interpretation, complete inventory
 collection, each successful download, extraction, and each reviewed document.
@@ -198,7 +196,7 @@ Each workflow creates a unique directory under `artifacts/`:
 | Output | Contents |
 |---|---|
 | `plan.json` | Interpreted request, metadata/counts, complete inventory, selections, model/call diagnostics |
-| `browser/<run>/` | Inventory browser report, DOM, screenshots, and Playwright trace |
+| `browser/<run>/` | Inventory browser JSON report, page text, and Playwright trace |
 | `downloads/` | Successfully validated selected files with unique safe filenames |
 | `extracted/<candidate_id>.json` | Text by physical page, extraction status, and coverage warnings |
 | `review.json` | Final per-document download/extraction/review results, citations, checksums, errors, and workflow status |
@@ -206,7 +204,10 @@ Each workflow creates a unique directory under `artifacts/`:
 | `<matter>_selected_documents.zip` | Successful selected downloads, including files whose review failed |
 | `retrieval_browser/<run>/` | Separate evidence from the fresh retrieval session |
 
-Review outputs are created with `--review`; no empty document ZIP is written.
+Document outputs (`review.json`, `review.md`, downloads, and ZIP) are created when
+the email requests downloads or review. For a
+download-only request, the report explicitly says contents were not reviewed;
+there is no extraction or content-model call. No empty document ZIP is written.
 `plan.json` records the original selection; use `review.json` to determine whether
 retrieval and content review actually completed. Completed work is preserved on
 partial failure, and failed reviews never become metadata summaries.
@@ -214,32 +215,22 @@ partial failure, and failed reviews never become metadata summaries.
 Exit codes: `0` for completion (including no matches), `2` for invalid input or
 clarification, `1` for failures or partial completion. A JSON batch exits `1` if
 any email fails, otherwise `2` if any needs clarification, otherwise `0`. It has
-no automatic batch resume; individual workflow directories support `--resume`.
+no automatic batch resume. Saved progress remains available to the internal resume function.
 An output-writing failure also exits `1`.
 
-## Inspect or download without AI
+## Diagnostics and internal functions
 
-```powershell
-.\.venv\Scripts\senpilot-probe.exe --matter M12205
-.\.venv\Scripts\senpilot-probe.exe --matter M12205 --category "Other Documents" --limit 3
-.\.venv\Scripts\senpilot-probe.exe --headed --inspect-seconds 30
-```
-
-Lookup stops after verified matter metadata and all category counts. Adding
-`--category` downloads the first requested records in website order and creates
-a checked ZIP. Omitting `--matter` captures the page for inspection. Each run
-writes `report.json` and browser evidence under `artifacts/`. To view a trace:
+Each browser session writes `report.json`, `page.txt`, and `trace.zip`; standalone
+HTML dumps and PNG screenshots are not saved. To view a captured trace:
 
 ```powershell
 .\.venv\Scripts\python.exe -m playwright show-trace artifacts\RUN_DIRECTORY\trace.zip
 ```
 
-The reusable async API is `senpilot_agent.planner.plan_email(email_text,
-Path("artifacts"), limit=10, review=True)`, returning `(directory, report)`.
-Use `senpilot_agent.planner.resume_email(Path("artifacts/RUN_DIRECTORY"))` to
-continue saved work with the same return type.
-Without the installed entry points, run `python -m senpilot_agent.plan_cli` or
-`python -m senpilot_agent.cli` from the virtual environment.
+The single user entry point is `senpilot-plan --emails-json PATH`. Internally,
+`process_emails` validates the inbox and calls `plan_email` for each message.
+`resume_email` and browser/download helpers remain reusable implementation
+functions for future integrations and tests, rather than additional user commands.
 
 ## Verification and local files
 
@@ -250,8 +241,9 @@ Without the installed entry points, run `python -m senpilot_agent.plan_cli` or
 Tests use offline browser fixtures, generated PDFs, and mocked Gemini responses.
 They cover inventory completeness, exact selected downloads, extraction limits,
 citation validation, partial failures, inbox processing, and end-to-end flows.
-The final recovery implementation passed all 274 tests, including interrupted-run
-resume, bounded retries, changed evidence, prompt upgrades, and fresh-session downloads.
+The tests cover per-email action/count inference, download-only ZIPs,
+interrupted-run resume, bounded retries, changed evidence, prompt upgrades,
+fresh-session downloads, and rejection of removed input modes.
 Live acceptance succeeded on October 27, 2026, for M12205 across all five
 categories: 56 unique candidates, four selected PDFs downloaded and reviewed
 (38 physical pages), and a verified four-file ZIP. Transient Gemini 503s recovered
