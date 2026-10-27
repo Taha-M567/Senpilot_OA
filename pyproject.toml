@@ -5,15 +5,16 @@ build-backend = "hatchling.build"
 [project]
 name = "senpilot-regulatory-agent"
 version = "0.1.0"
-description = "Regulatory document retrieval, starting with a live UARB browser probe"
+description = "UARB document retrieval, email request planning, and cited PDF text review"
 requires-python = ">=3.12"
-dependencies = ["playwright>=1.50,<2"]
+dependencies = ["playwright>=1.50,<2", "openai>=2,<3", "pydantic>=2,<3", "python-dotenv>=1,<2", "pypdf>=6,<7"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10"]
 
 [project.scripts]
 senpilot-probe = "senpilot_agent.cli:main"
+senpilot-plan = "senpilot_agent.plan_cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/senpilot_agent"]

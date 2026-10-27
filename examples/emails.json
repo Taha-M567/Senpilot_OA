@@ -1,0 +1,12 @@
+{
+  "emails": {
+    "email1": {
+      "subject": "M12205 decisions and orders",
+      "content": "Please select up to three decisions and orders for M12205 and review what conditions or filing requirements the Board imposed."
+    },
+    "email2": {
+      "subject": "M12205 key documents",
+      "content": "Please recommend up to two Key Documents for M12205."
+    }
+  }
+}

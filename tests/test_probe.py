@@ -3,6 +3,7 @@ import base64
 import builtins
 import json
 import os
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -42,7 +43,6 @@ def test_missing_playwright_produces_report_without_claiming_success(tmp_path, m
     directory, report = asyncio.run(inspect_site(tmp_path))
     assert report["status"] == "failed"
     assert report["stage"] == "import_playwright"
-    assert report["phase1_milestone_complete"] is False
     assert json.loads((directory / "report.json").read_text())["error"]["type"] == "ModuleNotFoundError"
     assert report['intended_request'] == {'matter_number': None}
     assert report['verified_matter_number'] is None
@@ -87,7 +87,6 @@ def test_offline_search_and_failure_evidence(mode, stage, error, offline_site, t
     directory, report = asyncio.run(inspect_site(tmp_path, matter_number='M12205', timeout_ms=1000))
     assert report['stage'] == stage
     assert report['intended_request'] == {'matter_number': 'M12205'}
-    assert report['phase1_milestone_complete'] is False
     assert report['capture_errors'] == []
     assert report['failed_requests'] == []
     assert report['blocked_origins'] == []
@@ -137,3 +136,97 @@ def test_offline_inspection_does_not_search(offline_site, tmp_path):
     assert report['matter_metadata'] == report['category_counts'] == {}
     assert report['total_document_count'] is None
     assert 'Go Directly to Matter' in (directory / 'page.txt').read_text()
+
+
+@pytest.mark.parametrize(('category', 'expected'), [
+    ('Exhibits', 2), ('Key Documents', 4), ('Other Documents', 7),
+    ('Transcripts', 0), ('Recordings', 0),
+])
+def test_download_categories_and_archive_contents(category, expected, document_site, tmp_path):
+    document_site()
+    directory, report = asyncio.run(inspect_site(tmp_path, matter_number='M12205', category=category, timeout_ms=2000))
+    assert report['status'] == ('documents_ready' if expected else 'no_documents'), report.get('error')
+    assert report['retrieval_complete'] is True
+    assert report['downloaded_document_count'] == expected
+    assert report['download_errors'] == []
+    assert report['capture_errors'] == []
+    assert report['intended_request'] == {'matter_number': 'M12205', 'category': category, 'limit': 10}
+    if not expected:
+        assert report['archive'] is None
+        assert not list(directory.glob('M12205_*.zip'))
+        return
+    with zipfile.ZipFile(directory / report['archive']['filename']) as archive:
+        assert archive.testzip() is None
+        assert set(archive.namelist()) == {item['filename'] for item in report['downloads']}
+        assert len(archive.namelist()) == expected
+        for index, item in enumerate(report['downloads']):
+            path = directory / item['relative_path']
+            assert path.read_bytes() == archive.read(item['filename'])
+            assert f'fixture {index}'.encode() in path.read_bytes()
+            assert len(item['sha256']) == 64
+            assert item['suggested_filename'] == 'same.pdf'
+    assert len({item['filename'] for item in report['downloads']}) == expected
+
+
+@pytest.mark.parametrize('category', ['Transcripts', 'Recordings'])
+def test_nonempty_media_categories_use_the_same_download_flow(category, document_site, tmp_path):
+    document_site(media=True)
+    _, report = asyncio.run(inspect_site(tmp_path, matter_number='M12205', category=category, timeout_ms=2000))
+    assert report['status'] == 'documents_ready', report.get('error')
+    assert report['downloaded_document_count'] == report['archive']['document_count'] == 2
+
+
+def test_document_labels_with_regex_characters_are_matched_literally(document_site, tmp_path):
+    document_site('special_id')
+    _, report = asyncio.run(inspect_site(tmp_path, matter_number='M12205', category='Exhibits', limit=1, timeout_ms=2000))
+    assert report['status'] == 'documents_ready', report.get('error')
+    assert report['downloads'][0]['document_id'] == 'H.1+(A)'
+
+
+@pytest.mark.parametrize('limit', [1, 10])
+def test_limit_and_overlapping_virtual_grid_pages(limit, document_site, tmp_path):
+    document_site(many=True)
+    _, report = asyncio.run(inspect_site(tmp_path, matter_number='M12205', category='Other Documents', limit=limit, timeout_ms=2000))
+    assert report['status'] == 'documents_ready', report.get('error')
+    assert report['downloaded_document_count'] == limit
+    assert [item['document_id'] for item in report['downloads']] == [str(1000 + i) for i in range(limit)]
+    assert report['archive']['document_count'] == limit
+    assert report['category_counts']['Other Documents'] == 13
+
+
+@pytest.mark.parametrize(('mode', 'expected'), [('partial', 2), ('all_fail', 0), ('download_timeout', 0), ('missing_dialog', 0)])
+def test_failed_documents_are_reported_and_excluded_from_zip(mode, expected, document_site, tmp_path):
+    document_site(mode)
+    directory, report = asyncio.run(inspect_site(tmp_path, matter_number='M12205', category='Other Documents', limit=3, timeout_ms=1000))
+    assert report['status'] == 'partial_download', report.get('error')
+    assert report['retrieval_complete'] is False
+    assert report['downloaded_document_count'] == expected
+    assert len(report['download_errors']) == 3 - expected
+    assert len(list((directory / 'downloads').glob('*'))) == expected
+    if expected:
+        with zipfile.ZipFile(directory / report['archive']['filename']) as archive:
+            assert len(archive.namelist()) == expected
+    else:
+        assert report['archive'] is None
+
+
+@pytest.mark.parametrize('mode', ['early_end', 'duplicate_ids', 'stuck_grid'])
+def test_list_failures_preserve_evidence_and_any_partial_archive(mode, document_site, tmp_path):
+    document_site(mode)
+    directory, report = asyncio.run(inspect_site(tmp_path, matter_number='M12205', category='Other Documents', timeout_ms=1000))
+    assert report['status'] == 'failed'
+    assert report['retrieval_complete'] is False
+    assert report['stage'] == 'read_document_list'
+    assert report['error']['message']
+    if report['downloads']:
+        assert (directory / report['archive']['filename']).is_file()
+
+
+@pytest.mark.parametrize(('category', 'matter', 'limit'), [
+    ('Unknown', 'M12205', 10), ('Exhibits', None, 10), ('Exhibits', 'M12205', 0), ('Exhibits', 'M12205', 11),
+    ('Exhibits', '../bad', 10), ('Exhibits', 'M12205', 1.5),
+])
+def test_invalid_retrieval_arguments_fail_before_creating_artifacts(category, matter, limit, tmp_path):
+    with pytest.raises(ValueError):
+        asyncio.run(inspect_site(tmp_path, category=category, matter_number=matter, limit=limit))
+    assert not list(tmp_path.iterdir())

@@ -69,3 +69,41 @@ def test_cli_prints_metadata_counts_and_total(tmp_path, monkeypatch, capsys):
                  'Key Documents: 4', 'Other Documents: 7', 'Transcripts: 0', 'Recordings: 0',
                  'Total documents: 13', 'download remains unverified'):
         assert text in output
+
+
+@pytest.mark.parametrize('arguments', [
+    ['--category', 'Exhibits'], ['--matter', 'M12205', '--category', 'Unknown'],
+    ['--matter', 'M12205', '--limit', '0'], ['--matter', 'M12205', '--limit', '11'],
+])
+def test_invalid_download_arguments_do_not_launch_browser(arguments, monkeypatch):
+    def unexpected(*args, **kwargs):
+        pytest.fail('Invalid arguments must not launch a browser')
+    monkeypatch.setattr(cli, 'inspect_site', unexpected)
+    monkeypatch.setattr(sys, 'argv', ['senpilot-probe', *arguments])
+    with pytest.raises(SystemExit) as error:
+        cli.main()
+    assert error.value.code == 2
+
+
+@pytest.mark.parametrize(('status', 'count', 'exit_code'), [
+    ('documents_ready', 2, 0), ('partial_download', 1, 1), ('no_documents', 0, 0),
+])
+def test_cli_download_summary_and_exit_status(status, count, exit_code, tmp_path, monkeypatch, capsys):
+    async def inspect(output, **kwargs):
+        assert kwargs['category'] == 'Exhibits'
+        assert kwargs['limit'] == 2
+        return tmp_path, {
+            'status': status, 'stage': 'retrieval_complete',
+            'metadata_counts_complete': True, 'matter_metadata': {'title': 'Fixture'},
+            'category_counts': {'Exhibits': 0 if status == 'no_documents' else 2},
+            'total_document_count': 2, 'downloaded_document_count': count,
+            'archive': {'filename': 'files.zip'} if count else None,
+            'download_errors': [{}] if status == 'partial_download' else [],
+        }
+    monkeypatch.setattr(cli, 'inspect_site', inspect)
+    monkeypatch.setattr(sys, 'argv', ['senpilot-probe', '--matter', 'M12205', '--category', 'Exhibits', '--limit', '2'])
+    assert cli.main() == exit_code
+    output = capsys.readouterr().out
+    assert f'Downloaded {count} of' in output
+    assert ('ZIP:' in output) is bool(count)
+    assert 'download remains unverified' not in output

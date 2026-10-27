@@ -1,4 +1,4 @@
-"""Inspect UARB or collect verified matter metadata and counts, retaining evidence."""
+"""Inspect UARB or retrieve verified matter details, documents, and ZIP evidence."""
 
 from datetime import datetime, timezone
 import json
@@ -6,6 +6,8 @@ from pathlib import Path
 import re
 from urllib.parse import urlsplit
 from uuid import uuid4
+
+from .downloads import CATEGORIES, retrieve_documents
 
 
 UARB_URL = "https://uarb.novascotia.ca/fmi/webd/UARB15"
@@ -29,13 +31,34 @@ def allowed_url(url: str) -> bool:
 async def inspect_site(
     output: Path, *, headed: bool = False, channel: str | None = None,
     timeout_ms: int = 30_000, inspect_seconds: int = 0,
-    matter_number: str | None = None,
+    matter_number: str | None = None, category: str | None = None, limit: int = 10,
+    inventory_categories: list[str] | None = None,
+    selected_records: list[dict] | None = None, download_directory: Path | None = None,
 ) -> tuple[Path, dict]:
     """Capture live DOM and controls, or a truthful failure report.
 
     Imports are lazy so a missing Playwright installation still produces a useful
     diagnostic. Only explicitly allowed UARB network requests are permitted.
     """
+    if matter_number is not None and re.fullmatch(r'M[0-9]{5}', matter_number) is None:
+        raise ValueError('Matter number must be M followed by five ASCII digits')
+    if category is not None and (category not in CATEGORIES or matter_number is None):
+        raise ValueError('A supported category and matter number are required for downloads')
+    if type(limit) is not int or not 1 <= limit <= 10:
+        raise ValueError('Download limit must be between 1 and 10')
+    if inventory_categories is not None and (
+        matter_number is None or category is not None or not inventory_categories
+        or len(set(inventory_categories)) != len(inventory_categories)
+        or any(value not in CATEGORIES for value in inventory_categories)
+    ):
+        raise ValueError('Inventory requires a matter and distinct supported categories, without downloads')
+    if selected_records is not None:
+        from .downloads import validate_selected_records
+        validate_selected_records(selected_records)
+        if matter_number is None or category is not None or inventory_categories is not None:
+            raise ValueError('Selected downloads require a matter, without category downloads or inventory mode')
+    if download_directory is not None and selected_records is None:
+        raise ValueError('A download directory requires selected records')
     run_dir = output / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
                         + "_" + uuid4().hex[:8])
     run_dir.mkdir(parents=True, exist_ok=False)
@@ -49,13 +72,27 @@ async def inspect_site(
         "category_counts": {},
         "total_document_count": None,
         "metadata_counts_complete": False,
-        "phase1_milestone_complete": False,
         "status": "starting",
         "stage": "import_playwright",
         "blocked_origins": [],
         "failed_requests": [],
         "capture_errors": [],
+        "downloads": [],
+        "download_errors": [],
+        "downloaded_document_count": 0,
+        "archive": None,
+        "retrieval_complete": False,
     }
+    if category is not None:
+        report['intended_request'].update(category=category, limit=limit)
+        report['purpose'] = 'Retrieve category documents and create a validated ZIP'
+    if inventory_categories is not None:
+        report['intended_request']['inventory_categories'] = inventory_categories
+        report['purpose'] = 'Collect complete document title/date inventory without opening documents'
+    if selected_records is not None:
+        report['intended_request']['selected_records'] = selected_records
+        report['purpose'] = 'Download exact shortlisted document identities'
+        report['download_base'] = str((download_directory or run_dir).resolve())
     browser = context = page = None
     tracing_started = False
     try:
@@ -65,10 +102,10 @@ async def inspect_site(
             try:
                 report["stage"] = "launch_browser"
                 browser = await playwright.chromium.launch(
-                    headless=not headed, channel=channel, timeout=timeout_ms,
+                    headless=not headed, channel=channel, timeout=max(timeout_ms, 10_000),
                 )
                 context = await browser.new_context(
-                    accept_downloads=True, viewport={"width": 1440, "height": 1000},
+                    accept_downloads=inventory_categories is None, viewport={"width": 1440, "height": 1000},
                     service_workers="block",
                 )
 
@@ -124,6 +161,15 @@ async def inspect_site(
                 if matter_number is not None:
                     detail = await _search_matter(page, matter_number, report)
                     await _extract_matter_details(detail, report, timeout_ms)
+                    if category is not None:
+                        await retrieve_documents(page, detail, run_dir, report, category, limit, timeout_ms)
+                    if inventory_categories is not None:
+                        from .inventory import collect_inventory
+                        await collect_inventory(page, report, inventory_categories, timeout_ms)
+                    if selected_records is not None:
+                        from .downloads import retrieve_selected_documents
+                        await retrieve_selected_documents(page, download_directory or run_dir, report,
+                                                          selected_records, timeout_ms)
                 if inspect_seconds:
                     # Explicit human inspection window, not a readiness heuristic.
                     import asyncio
@@ -148,7 +194,17 @@ async def inspect_site(
                     )
                     report["frames"].append({"index": index, "controls": controls})
                 report["status"] = "matter_found" if matter_number is not None else "inspection_captured"
-                report["stage"] = "extract_category_counts" if matter_number is not None else "inspect_dom"
+                if category is not None:
+                    report['status'] = ('documents_ready' if report['retrieval_complete']
+                                        else 'partial_download') if report['requested_document_count'] else 'no_documents'
+                    report['stage'] = 'retrieval_complete'
+                else:
+                    report["stage"] = "extract_category_counts" if matter_number is not None else "inspect_dom"
+                if inventory_categories is not None:
+                    report.update(status='inventory_ready', stage='inventory_complete')
+                if selected_records is not None:
+                    report.update(status='documents_ready' if report['retrieval_complete'] else 'partial_download',
+                                  stage='selected_retrieval_complete')
             finally:
                 if page is not None:
                     try:
@@ -173,6 +229,9 @@ async def inspect_site(
     except Exception as exc:
         report["status"] = "failed"
         report["error"] = {"type": type(exc).__name__, "message": str(exc)}
+        from .inventory import InventoryTooLarge
+        if isinstance(exc, InventoryTooLarge):
+            report.update(status='clarification', clarification_question=str(exc))
     finally:
         report["finished_at"] = datetime.now(timezone.utc).isoformat()
         (run_dir / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")

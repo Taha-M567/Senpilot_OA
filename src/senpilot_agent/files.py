@@ -40,7 +40,7 @@ def validate_download(path: Path) -> FileEvidence:
     """Reject empty/error responses; perform basic format checks and hash contents.
 
     These checks do not establish semantic correctness, malware safety, or that an
-    unfamiliar file format is valid. A full document parser belongs in Phase 2.
+    unfamiliar file format is valid. PDF text extraction is handled by content.py.
     """
     if not path.is_file() or path.is_symlink():
         raise ValueError("Download must be a regular, non-symlink file")
@@ -70,3 +70,25 @@ def validate_download(path: Path) -> FileEvidence:
             raise ValueError("Download is not a valid ZIP container") from exc
         validation = "ZIP container CRC checked"
     return FileEvidence(path.name, size, checksum, validation)
+
+
+def create_archive(paths: list[Path], destination: Path) -> FileEvidence:
+    """Publish a checked ZIP containing only the supplied, validated files."""
+    if not paths or len({path.name for path in paths}) != len(paths):
+        raise ValueError("Archive requires files with unique names")
+    for path in paths:
+        validate_download(path)
+    if destination.exists():
+        raise ValueError("Archive destination already exists")
+    temporary = destination.with_name(f'.{destination.name}.{uuid4().hex}.part')
+    try:
+        with zipfile.ZipFile(temporary, 'x', compression=zipfile.ZIP_DEFLATED) as archive:
+            for path in paths:
+                archive.write(path, arcname=path.name)
+        with zipfile.ZipFile(temporary) as archive:
+            if archive.testzip() is not None:
+                raise ValueError("Created archive failed CRC validation")
+        temporary.rename(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return validate_download(destination)

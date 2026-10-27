@@ -1,4 +1,4 @@
-"""Standalone Phase 1 inspection and matter-details entry point."""
+"""Inspect matters or retrieve category documents and a ZIP from the CLI."""
 
 import argparse
 import asyncio
@@ -7,6 +7,7 @@ import re
 import sys
 
 from .probe import inspect_site
+from .downloads import CATEGORIES
 
 
 def matter_argument(value: str) -> str:
@@ -18,9 +19,11 @@ def matter_argument(value: str) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Inspect UARB or collect verified matter metadata and counts, saving evidence.",
+        description="Inspect UARB, collect verified matter details, or download category documents into a ZIP.",
     )
     parser.add_argument("--matter", type=matter_argument, help="Matter number, for example M12205")
+    parser.add_argument('--category', choices=CATEGORIES, help='Download documents from this category and create a ZIP')
+    parser.add_argument('--limit', type=int, default=10, help='Maximum documents to retrieve (1-10; default: 10)')
     parser.add_argument("--output", type=Path, default=Path("artifacts"))
     parser.add_argument("--headed", action="store_true", help="Show the browser for debugging")
     parser.add_argument("--channel", choices=["chrome", "msedge"], help="Use installed Chrome or Edge")
@@ -28,6 +31,10 @@ def main() -> int:
     parser.add_argument("--inspect-seconds", type=int, default=0,
                         help="Debugging pause after inspection or search completes (maximum 60 seconds)")
     args = parser.parse_args()
+    if args.category and not args.matter:
+        parser.error('--category requires --matter')
+    if not 1 <= args.limit <= 10:
+        parser.error('--limit must be between 1 and 10')
     if not 1000 <= args.timeout_ms <= 120_000:
         parser.error("--timeout-ms must be between 1000 and 120000")
     if not 0 <= args.inspect_seconds <= 60:
@@ -35,7 +42,7 @@ def main() -> int:
     directory, report = asyncio.run(inspect_site(
         args.output, headed=args.headed, channel=args.channel,
         timeout_ms=args.timeout_ms, inspect_seconds=args.inspect_seconds,
-        matter_number=args.matter,
+        matter_number=args.matter, category=args.category, limit=args.limit,
     ))
     print(f"Status: {report['status']}; stage: {report['stage']}")
     print(f"Evidence: {directory.resolve() / 'report.json'}")
@@ -47,12 +54,23 @@ def main() -> int:
         for category, count in report["category_counts"].items():
             print(f"{category}: {count}")
         print(f"Total documents: {report['total_document_count']}")
-        print("Metadata and category counts captured; download remains unverified.")
+        if args.category:
+            print(f"Downloaded {report.get('downloaded_document_count', 0)} of "
+                  f"{report['category_counts'][args.category]} {args.category} documents.")
+            if report.get('archive'):
+                print(f"ZIP: {directory.resolve() / report['archive']['filename']}")
+            if report['status'] == 'no_documents':
+                print('The selected category is empty; no ZIP created.')
+        else:
+            print("Metadata and category counts captured; download remains unverified.")
     else:
         print("Metadata, category counts, and download remain unverified.")
     if report["status"] == "failed":
         encoding = sys.stdout.encoding or "utf-8"
         print(report["error"]["message"].encode(encoding, errors="backslashreplace").decode(encoding))
+        return 1
+    if report['status'] == 'partial_download':
+        print(f"Incomplete retrieval: {len(report['download_errors'])} document(s) failed; see report.json.")
         return 1
     return 0
 

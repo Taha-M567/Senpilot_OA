@@ -1,162 +1,217 @@
-# Senpilot Regulatory Document AI Agent
+﻿# Senpilot Regulatory Document AI Agent
 
-Phase 1 is **in progress; verified matter metadata and category counts work**.
-This repository provides a Playwright inspection/details command and offline
-tests. It does **not** yet download a UARB document.
+A Python CLI that interprets document requests, finds verified matters on the
+[UARB website](https://uarb.novascotia.ca/fmi/webd/UARB15), recommends up to ten
+documents, and optionally downloads and reviews their PDF text. It also accepts
+a local JSON inbox and produces JSON replies. Mailbox integration and email
+delivery are not implemented.
 
-The target milestone is to retrieve live metadata and all five category counts
-for `M12205`, then download and validate one file from **Other Documents**. Values
-in the assignment PDF are examples, never application defaults.
+The requirements are in [the assignment PDF](docs/Co-op%20Technical%20Assignment%20-%20Winter%202027.pdf).
+Example matter numbers are inputs, never application defaults.
 
-## Structure and dependencies
+## Setup
 
-```text
-src/senpilot_agent/
-  cli.py       # Standalone inspection and matter-details command
-  probe.py     # Async Playwright search, metadata/count extraction, and evidence
-  files.py     # Safe filenames, basic format checks, SHA-256
-tests/         # Offline tests; no requests to the public site
-docs/          # Assignment and investigation notes
-artifacts/     # Ignored local reports, DOM, screenshots, traces
-```
-
-Python **3.12+** and Playwright are the runtime requirements. Playwright operates
-the browser deterministically; pytest is the only development dependency. The
-helpers use the Python standard library. Pydantic, Gmail, LLMs, LangGraph, storage,
-and Docker are deferred to their planned phases. There is no reason to install
-them for a browser feasibility check.
-
-## Setup on this Windows machine
-
-Run from `C:\Users\taham\Repos\Senpilot_OA` in PowerShell:
+Requires Python 3.12+. Run these PowerShell commands from the repository root:
 
 ```powershell
-# Python 3.12 was found here; substitute your own 3.12+ executable elsewhere.
-uv venv --python C:\Python312\python.exe .venv --cache-dir .cache/uv
-uv pip install --python .venv\Scripts\python.exe --cache-dir .cache/uv -e ".[dev]"
-
-# Keep the browser installation inside this workspace.
+uv venv --python 3.12 .venv
+uv pip install --python .venv\Scripts\python.exe -e ".[dev]"
 $env:PLAYWRIGHT_BROWSERS_PATH = "$PWD\.cache\ms-playwright"
 .\.venv\Scripts\python.exe -m playwright install chromium
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+```
 
+Set `GEMINI_API_KEY` in `.env`. The optional `GEMINI_MODEL` defaults to
+`gemini-3.1-flash-lite`. Existing environment variables override `.env`, which
+is loaded from the current working directory and ignored by Git. Inspection and
+explicit category downloads work without an API key.
+
+Set `PLAYWRIGHT_BROWSERS_PATH` in each new terminal session. Alternatively, pass
+`--channel msedge` or `--channel chrome` to use an installed browser.
+Runtime dependencies are Playwright, the OpenAI SDK (for Google's compatible
+endpoint), Pydantic, python-dotenv, and pypdf. The development dependency is pytest.
+
+## Run the pipeline
+
+Process the [example inbox](examples/emails.json), downloading and reviewing up
+to three selected documents per email:
+
+```powershell
+.\.venv\Scripts\senpilot-plan.exe --emails-json examples/emails.json --review --limit 3
+```
+
+The JSON format is:
+
+```json
+{
+  "emails": {
+    "email1": {
+      "subject": "M12205 decisions and orders",
+      "content": "Review up to three decisions and orders. What conditions did the Board impose?"
+    }
+  }
+}
+```
+
+Output is `artifacts/<batch-run>/replies.json`, with the same email IDs and
+`subject`/`content` fields. Replies include selection reasons, findings, physical
+PDF page citations, limitations, and local file paths when available. Each email
+gets its own workflow directory. Emails run in order; replies are saved after
+each completes, and a failed email does not prevent the next from running.
+Extra fields, duplicate keys, empty inboxes, and blank IDs/subjects/bodies are
+rejected before browser or AI work. Local paths serve as attachment references.
+
+For a single request, create a UTF-8 text file and run:
+
+```powershell
+.\.venv\Scripts\senpilot-plan.exe --email-file request.txt --review --limit 3
+```
+
+Omit `--review` for recommendations based on titles and metadata only. Content
+questions require `--review`. Both input options accept `-` for standard input:
+
+```powershell
+Get-Content -Raw examples/emails.json | .\.venv\Scripts\senpilot-plan.exe --emails-json - --review
+```
+
+Both commands support `--output PATH`, `--headed`, `--channel chrome|msedge`,
+`--timeout-ms 30000` (range 1000-120000), and `--inspect-seconds 0` (range 0-60).
+`--limit` is 1-10, defaulting to 10; the email's requested count also caps results.
+Use one explicitly written matter number: `M` followed by five ASCII digits.
+Missing, multiple, contradictory, or unsupported requests return clarification.
+
+## How it works
+
+```mermaid
+flowchart TD
+    Input[Email text or JSON inbox] --> Interpret[Gemini interprets the request]
+    Interpret --> Validate[Validate matter, categories, and limits]
+    Validate --> Inventory[Playwright verifies the matter and collects the complete inventory]
+    Inventory --> Rank[Gemini ranks real document IDs using titles and metadata]
+    Rank --> Plan[Save plan.json]
+    Plan --> Review{Review enabled?}
+    Review -->|No| Reply[Return recommendations or JSON reply]
+    Review -->|Yes| Download[Fresh browser session downloads exact selected records]
+    Download --> Extract[Extract all readable PDF text with physical page numbers]
+    Extract --> Findings[Gemini reviews each eligible PDF; validate source citations]
+    Findings --> Output[Save review.json, review.md, and selected-file ZIP]
+    Output --> Reply
+```
+
+Steps run sequentially. The request handler waits for the complete inventory
+before ranking, all download attempts before extraction, and each PDF's
+extraction and review before starting the next. `async`/`await` allows waiting
+for browser/API work; it does not make these steps parallel.
+
+| Module | Responsibility |
+|---|---|
+| `plan_cli.py` | Read text or JSON input, call the workflow, print output paths and exit status |
+| `email_flow.py` | Validate the inbox, process each subject/body, format replies from existing results |
+| `planner.py` | Interpret and validate the request, collect inventory, rank candidates, save the plan, optionally start review |
+| `probe.py` | Start a restricted Playwright browser, search and verify the matter, read metadata/counts, dispatch listing or downloads, capture evidence |
+| `inventory.py` | Traverse complete virtual grids; merge identical number/title/date records across categories |
+| `downloads.py` | Select categories, recheck selected record identities, open download dialogs, save checked files |
+| `files.py` | Safe filenames, basic format checks, SHA-256 checksums, checked ZIP creation |
+| `content.py` | Extract PDF text in a disposable process with bounded time and size |
+| `review.py` | Prepare source excerpts, call Gemini, validate citations, save reports and the selected-document ZIP |
+| `cli.py` | Standalone inspection, matter lookup, or category downloads through `senpilot-probe` |
+
+The browser verifies the returned read-only matter number, then reads metadata
+and counts for Exhibits, Key Documents, Other Documents, Transcripts, and
+Recordings. Omitting categories searches all five; decisions/orders are topics,
+not inferred category restrictions. Missing widgets, mismatched identifiers,
+invalid counts, and incomplete inventories fail visibly. Inventories exceeding
+1,000 candidates require narrower categories. Browser network traffic is
+restricted to the UARB origin; the model never controls the browser.
+
+Gemini first sees the email text, then the validated request and complete real
+inventory. Ranking rejects unknown or repeated candidate IDs, empty reasons,
+and selections above the result limit. An empty inventory skips ranking; an
+empty shortlist skips downloads and content review. The shortlist remains based
+on metadata even when content review is enabled.
+
+Review downloads use a fresh browser session, reverify the matter and counts,
+and match each selected number/title/date exactly. Shared records download once;
+missing, changed, or ambiguous records fail without substitutes. File checksums
+are checked again before review and ZIP creation.
+
+PDF extraction limits are 20 MiB, 100 pages, 100,000 extracted characters,
+10 MiB of decoded content per page, and a 60-second process deadline. Encrypted,
+corrupt, unsupported, over-limit, and partially unreadable files remain explicitly
+unreviewed. OCR, images, diagrams, and visual layout are outside the review scope.
+
+Each eligible PDF gets one Gemini call using excerpts covering all its extracted
+text. The model cites stable source IDs; the application resolves them to local
+quotations and physical page numbers, then checks the evidence before publishing
+up to five findings. Citation checks establish traceability; human judgment is
+still needed to assess interpretations. Rejected output stays diagnostic data.
+Calls use the configured Gemini model through Google's OpenAI-compatible
+endpoint, structured output, low reasoning effort, a 60-second deadline, and no
+automatic retries or model fallback.
+
+## Outputs and failures
+
+Each workflow creates a unique directory under `artifacts/`:
+
+| Output | Contents |
+|---|---|
+| `plan.json` | Interpreted request, metadata/counts, complete inventory, selections, model/call diagnostics |
+| `browser/<run>/` | Inventory browser report, DOM, screenshots, and Playwright trace |
+| `downloads/` | Successfully validated selected files with unique safe filenames |
+| `extracted/<candidate_id>.json` | Text by physical page, extraction status, and coverage warnings |
+| `review.json` | Final per-document download/extraction/review results, citations, checksums, errors, and workflow status |
+| `review.md` | Readable findings and local file/page links |
+| `<matter>_selected_documents.zip` | Successful selected downloads, including files whose review failed |
+| `retrieval_browser/<run>/` | Separate evidence from the fresh retrieval session |
+
+Review outputs are created with `--review`; no empty document ZIP is written.
+`plan.json` records the original selection; use `review.json` to determine whether
+retrieval and content review actually completed. Completed work is preserved on
+partial failure, and failed reviews never become metadata summaries.
+
+Exit codes: `0` for completion (including no matches), `2` for invalid input or
+clarification, `1` for failures or partial completion. A JSON batch exits `1` if
+any email fails, otherwise `2` if any needs clarification, otherwise `0`. It has
+no automatic resume. An output-writing failure also exits `1`.
+
+## Inspect or download without AI
+
+```powershell
+.\.venv\Scripts\senpilot-probe.exe --matter M12205
+.\.venv\Scripts\senpilot-probe.exe --matter M12205 --category "Other Documents" --limit 3
 .\.venv\Scripts\senpilot-probe.exe --headed --inspect-seconds 30
-.\.venv\Scripts\senpilot-probe.exe --matter M12205 --headed
-.\.venv\Scripts\python.exe -m pytest -q
 ```
 
-The environment variable must also be set in subsequent terminal sessions using
-that browser installation. Alternatively, use an already installed Chromium
-browser with `senpilot-probe --channel msedge --headed`; that avoids downloading
-Chromium, but still requires the Python Playwright package.
-
-Without an editable package installation, run from source:
-
-```powershell
-$env:PYTHONPATH = "$PWD\src"
-.\.venv\Scripts\python.exe -m senpilot_agent.cli --headed
-```
-
-## Searching and reading the evidence
-
-To search, verify, and extract details for a supplied matter in a fresh session:
-
-```powershell
-$env:PLAYWRIGHT_BROWSERS_PATH = "$PWD\.cache\ms-playwright"
-.\.venv\Scripts\senpilot-probe.exe --matter M12205 --headed
-```
-
-Omit `--headed` for headless operation. Omit `--matter` for inspection only;
-there is no default matter. Matter numbers are trimmed, uppercased, and must
-contain `M` followed by exactly five ASCII digits. Invalid arguments exit with
-code 2 before launching a browser.
-
-Search success requires the returned **read-only matter identifier in the detail
-area** to exactly match the requested number. The submitted input and HTTP 200
-are not proof. The probe commits the active FileMaker editor with Tab, clicks
-the associated direct-matter Search button, and waits for detail data or the
-observed No Records Found response. Ambiguous controls, missing data, mismatches,
-and timeouts fail without automatic retries.
-
-After verification, the command reads the title, status, type, category, date
-received, decision date, and outcome from their observed detail-page widgets.
-Dates retain the site's displayed format. The title must be nonempty; blank
-optional values are reported as `null`. Missing or ambiguous widgets fail instead
-of being interpreted as blank values.
-
-Each of the five document-category buttons is read independently. Counts must
-be nonnegative integers; explicit zero counts are valid, but missing, ambiguous,
-or malformed counts fail. Their sum is the total across those five categories.
-No category tab is opened and no document is downloaded during this step.
-
-Each invocation creates a unique directory under `artifacts/` with `report.json`.
-When browser startup/navigation succeeds, it also attempts to save:
-
-- `page.png`, `page.html`, and `page.txt` for the final page state.
-- `frame-*.html` and an inventory of controls in `report.json` for selector review.
-- `trace.zip` for Playwright Trace Viewer.
+Lookup stops after verified matter metadata and all category counts. Adding
+`--category` downloads the first requested records in website order and creates
+a checked ZIP. Omitting `--matter` captures the page for inspection. Each run
+writes `report.json` and browser evidence under `artifacts/`. To view a trace:
 
 ```powershell
 .\.venv\Scripts\python.exe -m playwright show-trace artifacts\RUN_DIRECTORY\trace.zip
 ```
 
-`matter_found` and exit code 0 mean the detail identifier was verified and metadata
-and counts were captured. The report records `intended_request.matter_number`,
-`observed_matter_number`, and `verified_matter_number`. It also includes:
+The reusable async API is `senpilot_agent.planner.plan_email(email_text,
+Path("artifacts"), limit=10, review=True)`, returning `(directory, report)`.
+Without the installed entry points, run `python -m senpilot_agent.plan_cli` or
+`python -m senpilot_agent.cli` from the virtual environment.
 
-- `matter_metadata`: `matter_number`, `title`, `status`, `type`, `category`,
-  `date_received`, `decision_date`, and `outcome`.
-- `category_counts`: integer counts keyed by Exhibits, Key Documents, Other
-  Documents, Transcripts, and Recordings.
-- `total_document_count`: their sum; `null` until every count has been validated.
-- `metadata_counts_complete`: true only after both extraction steps succeed.
+## Verification and local files
 
-`inspection_captured` and exit code 0 mean inspection completed without a search.
-`failed` exits with code 1 and records the error and stage, including
-`locate_matter_field`, `submit_matter_search`, `verify_matter`, `extract_metadata`,
-or `extract_category_counts`. A verified identifier remains available if later
-extraction fails; completed metadata is also retained if count extraction fails.
-Failure evidence uses the same directory structure.
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
+```
 
-`phase1_milestone_complete` remains false because a persisted, validated download
-is still pending. `--timeout-ms 60000` changes bounded browser/element
-timeouts. `--inspect-seconds` adds an optional debugging pause **after** the
-requested workflow succeeds; it is not an application readiness condition.
+Tests use offline browser fixtures, generated PDFs, and mocked Gemini responses.
+They cover inventory completeness, exact selected downloads, extraction limits,
+citation validation, partial failures, inbox processing, and end-to-end flows.
+Live lookup, full metadata planning, selected downloads, and individual PDF
+reviews have succeeded in prior runs. Complete fresh live content-review
+acceptance remains unverified: previous attempts encountered Gemini HTTP 503
+responses and UARB download timeouts.
 
-Only HTTPS/WSS on `uarb.novascotia.ca:443` is permitted. Other origins are blocked
-and recorded. If live inspection establishes a required resource host, review it
-and add that exact host deliberately. Do not disable TLS verification to bypass
-a browser certificate error. Artifacts can contain session identifiers and are
-excluded from Git.
-
-## Confirmed results and remaining work
-
-See [Phase 1 investigation](docs/phase1-investigation.md) for the actual attempts.
-The initial network restriction is resolved. M12205 was searched and verified
-without manual intervention in fresh headed and headless Chromium sessions. The
-selector contract comes from live DOM observation across fresh sessions; static
-FileMaker layout-object classes distinguish the direct Search button and
-read-only result field. No session-specific element IDs or button indexes are
-used. A site layout change may require updating those selectors.
-
-Metadata and all five category counts were also verified in a fresh live M12205
-run, with structured output compared against the saved page text and screenshot.
-The next milestone is one persisted and validated download. Selecting Other
-Documents and the first Go Get It action still needs investigation: whether it
-emits a download event, opens a popup, or navigates to a file remains unknown.
-ZIP creation and email integration remain deferred.
-
-The offline browser fixtures reproduce the observed styled-div activation,
-Tab commit, three Search controls, asynchronous detail data, and no-result
-feedback, followed by delayed metadata and category-count updates. They cover
-success, zero counts, blank optional fields, malformed/missing counts, missing or
-ambiguous widgets, and workflow timeouts without contacting UARB.
-Install Chromium as above before running the complete suite.
-
-The existing validator rejects empty files, HTML error responses, basic malformed
-PDFs, and corrupt ZIP containers, and calculates SHA-256. A PDF header/end marker
-is a basic check rather than a full PDF parse. Unknown formats are explicitly
-reported as unvalidated. No archive delivery or email functionality exists yet.
-
-Official references: [Playwright installation](https://playwright.dev/python/docs/intro),
-[download events and persistence](https://playwright.dev/python/docs/downloads),
-[browser context routing](https://playwright.dev/python/docs/api/class-browsercontext).
+`src/`, `tests/`, `examples/`, and the assignment PDF support the pipeline and its
+verification. `.env` holds local credentials; `.venv/` and
+`.cache/ms-playwright/` hold the local runtime. `artifacts/`, `.pytest_cache/`,
+`__pycache__/`, and installer caches are disposable and ignored by Git. Old run
+artifacts and investigation logs are not required; new runs recreate outputs.

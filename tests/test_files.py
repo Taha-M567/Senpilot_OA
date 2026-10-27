@@ -3,7 +3,7 @@ import zipfile
 
 import pytest
 
-from senpilot_agent.files import safe_download_path, validate_download
+from senpilot_agent.files import create_archive, safe_download_path, validate_download
 
 
 @pytest.mark.parametrize("name", ["../../escape.pdf", r"C:\temp\file.pdf", "CON", "...", "", "a:b?.pdf"])
@@ -59,3 +59,35 @@ def test_invalid_zip_rejected(tmp_path):
     path.write_bytes(b"not a zip")
     with pytest.raises(ValueError, match="ZIP"):
         validate_download(path)
+
+
+def test_create_archive_roundtrips_only_requested_files(tmp_path):
+    paths = [tmp_path / 'first.pdf', tmp_path / 'second.pdf']
+    for i, path in enumerate(paths):
+        path.write_bytes(f'%PDF-1.7\n{i}\n%%EOF'.encode())
+    (tmp_path / 'not-requested.txt').write_text('exclude me')
+    destination = tmp_path / 'documents.zip'
+    evidence = create_archive(paths, destination)
+    assert evidence == validate_download(destination)
+    with zipfile.ZipFile(destination) as archive:
+        assert archive.namelist() == [path.name for path in paths]
+        for path in paths:
+            assert archive.read(path.name) == path.read_bytes()
+    assert not list(tmp_path.glob('*.part'))
+
+
+def test_archive_rejects_invalid_files_and_existing_destination(tmp_path):
+    destination = tmp_path / 'documents.zip'
+    invalid = tmp_path / 'invalid.pdf'
+    invalid.write_text('<html>Error</html>')
+    with pytest.raises(ValueError):
+        create_archive([invalid], destination)
+    assert not destination.exists()
+    with pytest.raises(ValueError):
+        create_archive([], destination)
+    valid = tmp_path / 'valid.pdf'
+    valid.write_bytes(b'%PDF-1.7\n%%EOF')
+    destination.write_bytes(b'keep me')
+    with pytest.raises(ValueError):
+        create_archive([valid], destination)
+    assert destination.read_bytes() == b'keep me'
