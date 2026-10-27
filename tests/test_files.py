@@ -3,7 +3,7 @@ import zipfile
 
 import pytest
 
-from senpilot_agent.files import create_archive, safe_download_path, validate_download
+from senpilot_agent.files import create_archive, safe_download_path, validate_download, write_json
 
 
 @pytest.mark.parametrize("name", ["../../escape.pdf", r"C:\temp\file.pdf", "CON", "...", "", "a:b?.pdf"])
@@ -16,6 +16,19 @@ def test_filename_stays_in_download_directory(tmp_path, name):
 
 def test_duplicate_suggested_names_get_unique_paths(tmp_path):
     assert safe_download_path(tmp_path, "report.pdf") != safe_download_path(tmp_path, "report.pdf")
+
+
+def test_interrupted_checkpoint_replace_preserves_previous_json(tmp_path, monkeypatch):
+    from pathlib import Path
+    destination = tmp_path/'review.json'
+    write_json(destination, {'status':'saved'})
+    def interrupted(*args):
+        raise PermissionError('Checkpoint is locked')
+    monkeypatch.setattr(Path, 'replace', interrupted)
+    with pytest.raises(PermissionError):
+        write_json(destination, {'status':'new'})
+    assert destination.read_text(encoding='utf-8').strip() == '{\n  "status": "saved"\n}'
+    assert list(tmp_path.iterdir()) == [destination]
 
 
 def test_pdf_basic_validation_and_checksum(tmp_path):

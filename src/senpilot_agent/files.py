@@ -2,10 +2,21 @@
 
 from dataclasses import asdict, dataclass
 import hashlib
+import json
 from pathlib import Path
 import re
 from uuid import uuid4
 import zipfile
+
+
+def write_json(path: Path, data: dict) -> None:
+    """Replace a checkpoint atomically so interruption cannot truncate the last one."""
+    temporary = path.with_name(f'.{path.name}.{uuid4().hex}.tmp')
+    try:
+        temporary.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding='utf-8')
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 @dataclass(frozen=True)

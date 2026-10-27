@@ -58,7 +58,7 @@ def workflow(tmp_path, pdf_bytes, monkeypatch):
             'relative_path': path.relative_to(directory).as_posix(), 'suggested_filename': 'order.pdf'})
 
     async def inspect(output, **kwargs):
-        assert kwargs['selected_records'] == records
+        assert all(item in records for item in kwargs['selected_records'])
         assert kwargs['download_directory'] == directory
         return output / 'evidence', deepcopy(browser)
 
@@ -109,7 +109,8 @@ def test_complete_review_reports_citations_counts_and_exact_archive(workflow):
 ])
 def test_failed_review_is_visible_preserves_other_review_and_downloads(workflow, bad):
     directory, plan, browser, client, parse = workflow
-    parse.side_effect = [bad, response(result('C0002'))]
+    attempts = 3 if isinstance(bad, Exception) and planner.retry_delay(bad, 1) is not None else 1
+    parse.side_effect = [bad] * attempts + [response(result('C0002'))]
     report = asyncio.run(review.review_selected(directory, plan, client, planner._structured_call))
     assert report['status'] == 'partial_review'
     assert report['reviewed_count'] == report['failed_count'] == 1
@@ -117,7 +118,7 @@ def test_failed_review_is_visible_preserves_other_review_and_downloads(workflow,
     assert report['documents'][0]['status'] == 'review_failed'
     assert report['documents'][0]['review'] is None
     assert report['documents'][1]['status'] == 'reviewed'
-    assert parse.await_count == 2
+    assert parse.await_count == attempts + 1
     assert report['archive']['document_count'] == 2
     assert 'secret-not-for-report' not in (directory / 'review.json').read_text()
 
@@ -306,3 +307,189 @@ def test_source_references_parse_through_actual_sdk_with_mock_google_http():
 
     checked = asyncio.run(check())
     assert checked['findings'][0]['citations'] == [{'page': 1, 'quote': TEXT}]
+
+
+def test_completed_resume_reuses_downloads_extraction_reviews_and_archive(workflow, monkeypatch):
+    directory, plan, browser, client, parse = workflow
+    first = asyncio.run(review.review_selected(directory, plan, client, planner._structured_call))
+    before = (directory / first['archive']['relative_path']).read_bytes()
+    review.inspect_site.reset_mock()
+    parse.reset_mock()
+    monkeypatch.setattr(review, 'extract_document', AsyncMock(side_effect=AssertionError('Must reuse extraction')))
+    second = asyncio.run(review.review_selected(directory, plan, client, planner._structured_call, resume=True))
+    assert second['status'] == 'completed'
+    assert second['documents'] == first['documents']
+    assert second['archive'] == first['archive']
+    assert (directory / second['archive']['relative_path']).read_bytes() == before
+    parse.assert_not_called()
+    review.inspect_site.assert_not_called()
+
+
+def test_resume_retries_only_failed_review_and_keeps_success(workflow):
+    directory, plan, browser, client, parse = workflow
+    parse.side_effect = [response(None, refusal='Refused'), response(result('C0002'))]
+    first = asyncio.run(review.review_selected(directory, plan, client, planner._structured_call))
+    assert first['status'] == 'partial_review'
+    review.inspect_site.reset_mock()
+    parse.reset_mock()
+    parse.side_effect = [response(result('C0001'))]
+    second = asyncio.run(review.review_selected(directory, plan, client, planner._structured_call, resume=True))
+    assert second['status'] == 'completed'
+    assert parse.await_count == 1
+    assert second['documents'][1] == first['documents'][1]
+    assert second['archive'] == first['archive']
+    review.inspect_site.assert_not_called()
+
+
+def test_download_retry_uses_new_session_and_only_unfinished_candidates(workflow, no_retry_waits):
+    directory, plan, browser, client, parse = workflow
+    attempts = []
+
+    async def inspect(output, **options):
+        attempts.append([x['candidate_id'] for x in options['selected_records']])
+        assert options['restart_on_download_timeout']
+        batch = deepcopy(browser)
+        if len(attempts) == 1:
+            batch.update(status='partial_download', downloads=browser['downloads'][:1],
+                download_errors=[dict(candidate_id='C0002', type='TimeoutError', retryable=True, message='Stalled')])
+            await options['download_callback'](batch['downloads'][0])
+            saved = json.loads((directory / 'review.json').read_text())
+            assert saved['documents'][0]['download']['sha256'] == batch['downloads'][0]['sha256']
+        else:
+            batch['downloads'] = browser['downloads'][1:]
+        return output / f'attempt-{len(attempts)}', batch
+
+    review.inspect_site.side_effect = inspect
+    report = asyncio.run(review.review_selected(directory, plan, client, planner._structured_call))
+    assert report['status'] == 'completed'
+    assert attempts == [['C0001', 'C0002'], ['C0002']]
+    assert no_retry_waits.await_args_list[0].args == (5,)
+    assert len(report['retrieval_attempts']) == 2
+
+
+def test_download_retry_exhaustion_is_bounded(workflow, no_retry_waits):
+    directory, plan, browser, client, parse = workflow
+    browser.update(status='partial_download', downloads=[], download_errors=[
+        dict(candidate_id=x['candidate_id'], type='TimeoutError', retryable=True, message='Stalled')
+        for x in plan['ranked_selections']])
+    report = asyncio.run(review.review_selected(directory, plan, client, planner._structured_call))
+    assert report['status'] == 'partial_review'
+    assert review.inspect_site.await_count == 3
+    assert [x.args for x in no_retry_waits.await_args_list] == [(5,), (15,)]
+    assert report['archive'] is None
+    parse.assert_not_called()
+
+
+def test_one_persistently_stalled_file_does_not_starve_other_selections(workflow):
+    directory, plan, browser, client, parse = workflow
+    requests = []
+    async def inspect(output, **options):
+        ids = [x['candidate_id'] for x in options['selected_records']]
+        requests.append(ids)
+        if ids[0] == 'C0001':
+            return output/f'session-{len(requests)}', {**browser, 'status':'partial_download', 'downloads':[],
+                'download_errors':[dict(candidate_id='C0001', type='TimeoutError', retryable=True, message='Stalled')] +
+                ([dict(candidate_id='C0002', type='SessionRestartRequired', retryable=True, message='Not attempted')]
+                 if 'C0002' in ids else [])}
+        return output/f'session-{len(requests)}', {**browser, 'status':'partial_download',
+            'downloads':browser['downloads'][1:], 'download_errors':[
+                dict(candidate_id='C0001', type='TimeoutError', retryable=True, message='Stalled')]}
+    review.inspect_site.side_effect = inspect
+    parse.side_effect = [response(result('C0002'))]
+    report = asyncio.run(review.review_selected(directory, plan, client, planner._structured_call))
+    assert requests == [['C0001','C0002'], ['C0002','C0001'], ['C0001']]
+    assert report['status'] == 'partial_review'
+    assert report['downloaded_count'] == report['reviewed_count'] == 1
+    assert report['documents'][1]['status'] == 'reviewed'
+
+
+def test_interrupted_download_checkpoint_resumes_without_redownloading_success(workflow):
+    directory, plan, browser, client, parse = workflow
+
+    async def interrupted(output, **options):
+        await options['download_callback'](browser['downloads'][0])
+        raise asyncio.CancelledError()
+
+    review.inspect_site.side_effect = interrupted
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(review.review_selected(directory, plan, client, planner._structured_call))
+    assert json.loads((directory / 'review.json').read_text())['downloaded_count'] == 1
+
+    async def remaining(output, **options):
+        assert options['selected_records'] == plan['ranked_selections'][1:]
+        return output/'resumed', {**browser, 'downloads': browser['downloads'][1:]}
+
+    review.inspect_site.side_effect = remaining
+    report = asyncio.run(review.review_selected(directory, plan, client, planner._structured_call, resume=True))
+    assert report['status'] == 'completed'
+    assert report['archive']['document_count'] == 2
+    assert len(list(directory.glob('*.zip'))) == 2  # Previous partial ZIP remains available.
+
+
+def test_changed_extraction_is_rebuilt_and_previously_reviewed_text_is_not_reused(workflow):
+    directory, plan, browser, client, parse = workflow
+    first = asyncio.run(review.review_selected(directory, plan, client, planner._structured_call))
+    path = directory/first['documents'][0]['extraction']['relative_path']
+    path.write_text('{"pages": [{"page": 1, "text": "invented"}]}')
+    review.inspect_site.reset_mock()
+    parse.reset_mock()
+    parse.side_effect = [response(result('C0001'))]
+    second = asyncio.run(review.review_selected(directory, plan, client, planner._structured_call, resume=True))
+    assert second['status'] == 'completed'
+    assert parse.await_count == 1
+    assert json.loads(path.read_text())['pages'][0]['text'] == TEXT
+    review.inspect_site.assert_not_called()
+
+
+def test_resume_does_not_read_a_download_path_outside_its_run(workflow, tmp_path):
+    directory, plan, browser, client, parse = workflow
+    asyncio.run(review.review_selected(directory, plan, client, planner._structured_call))
+    saved = json.loads((directory/'review.json').read_text())
+    saved['documents'][0]['download']['relative_path'] = '../outside.pdf'
+    (directory/'review.json').write_text(json.dumps(saved))
+
+    async def redownload(output, **options):
+        assert options['selected_records'] == plan['ranked_selections'][:1]
+        return output/'safe', {**browser, 'downloads': browser['downloads'][:1]}
+
+    review.inspect_site.side_effect = redownload
+    parse.side_effect = [response(result('C0001'))]
+    report = asyncio.run(review.review_selected(directory, plan, client, planner._structured_call, resume=True))
+    assert report['status'] == 'completed'
+    assert report['documents'][0]['download']['relative_path'] == 'downloads/C0001.pdf'
+
+
+@pytest.mark.parametrize('complete', [True, False])
+def test_resume_without_key_preserves_completed_work(workflow, monkeypatch, complete):
+    directory, plan, browser, client, parse = workflow
+    if not complete:
+        parse.side_effect = [response(None, refusal='Refused'), response(result('C0002'))]
+    first = asyncio.run(review.review_selected(directory, plan, client, planner._structured_call))
+    monkeypatch.delenv('GEMINI_API_KEY', raising=False)
+    monkeypatch.setattr(planner, 'dotenv_values', lambda *a, **kw: {})
+    monkeypatch.setattr(planner, 'AsyncOpenAI', lambda **kw: pytest.fail('No key must not create an API client'))
+    review.inspect_site.reset_mock()
+    second = asyncio.run(planner._review_plan(directory, plan, resume=True))
+    assert second['status'] == ('completed' if complete else 'partial_review')
+    assert second['documents'][1] == first['documents'][1]
+    assert second['downloaded_count'] == 2
+    assert second['archive'] == first['archive']
+    review.inspect_site.assert_not_called()
+
+
+def test_prompt_upgrade_reuses_files_and_extraction_but_rebuilds_content_review(workflow, monkeypatch):
+    directory, plan, browser, client, parse = workflow
+    first = asyncio.run(review.review_selected(directory, plan, client, planner._structured_call))
+    old = deepcopy(first)
+    old['prompt_version'] = 'older-review-prompt'
+    (directory/'review.json').write_text(json.dumps(old))
+    review.inspect_site.reset_mock()
+    parse.reset_mock()
+    parse.side_effect = [response(result('C0001')), response(result('C0002'))]
+    monkeypatch.setattr(review, 'extract_document', AsyncMock(side_effect=AssertionError('Reuse verified extraction')))
+    second = asyncio.run(review.review_selected(directory, plan, client, planner._structured_call, resume=True))
+    assert second['status'] == 'completed'
+    assert second['prompt_version'] == review.REVIEW_PROMPT_VERSION
+    assert parse.await_count == 2
+    assert second['archive'] == first['archive']
+    review.inspect_site.assert_not_called()

@@ -57,3 +57,19 @@ def test_selected_tab_that_keeps_scroll_position_is_reset_before_exact_download(
         selected_records=[candidate(0)], timeout_ms=2000))
     assert report['status'] == 'documents_ready', report.get('error') or report['download_errors']
     assert b'fixture 0' in (run / report['downloads'][0]['relative_path']).read_bytes()
+
+
+def test_stalled_selected_download_closes_session_before_attempting_more_files(document_site, tmp_path):
+    document_site('download_timeout')
+    records = [candidate(1), candidate(0, candidate_id='C0002')]
+    _, report = asyncio.run(inspect_site(tmp_path, matter_number='M12205', selected_records=records,
+        restart_on_download_timeout=True, timeout_ms=1000))
+    assert report['status'] == 'partial_download'
+    assert report['downloads'] == []
+    assert [x['type'] for x in report['download_errors']] == ['TimeoutError', 'SessionRestartRequired']
+    assert all(x['retryable'] for x in report['download_errors'])
+    document_site('success')
+    _, recovered = asyncio.run(inspect_site(tmp_path, matter_number='M12205', selected_records=records,
+        restart_on_download_timeout=True, timeout_ms=2000))
+    assert recovered['status'] == 'documents_ready'
+    assert len(recovered['downloads']) == 2

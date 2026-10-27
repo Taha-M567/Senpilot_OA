@@ -146,3 +146,30 @@ def test_json_reply_output_error_exits_one(monkeypatch, capsys):
     monkeypatch.setattr(sys, 'argv', ['senpilot-plan', '--emails-json', '-'])
     assert plan_cli.main() == 1
     assert 'Cannot write email replies' in capsys.readouterr().err
+
+
+def test_resume_uses_saved_workflow_and_prints_review_paths(monkeypatch, tmp_path, capsys):
+    async def resume(directory, **options):
+        assert directory == tmp_path
+        assert options['timeout_ms'] == 2000
+        return directory, dict(status='completed', basis='PDF text only', documents=[],
+            downloaded_count=0, reviewed_count=0, failed_count=0, archive=None)
+    monkeypatch.setattr(plan_cli, 'resume_email', resume)
+    monkeypatch.setattr(sys, 'argv', ['senpilot-plan', '--resume', str(tmp_path), '--timeout-ms', '2000'])
+    assert plan_cli.main() == 0
+    assert 'review.json' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('extra', [['--email-file', '-'], ['--emails-json', '-'], ['--limit','3']])
+def test_resume_cannot_change_input_or_limit(monkeypatch, tmp_path, extra):
+    monkeypatch.setattr(sys, 'argv', ['senpilot-plan', '--resume', str(tmp_path), *extra])
+    with pytest.raises(SystemExit) as error:
+        plan_cli.main()
+    assert error.value.code == 2
+
+
+def test_missing_resume_checkpoint_returns_invalid_input(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, 'argv', ['senpilot-plan', '--resume', str(tmp_path/'missing')])
+    with pytest.raises(SystemExit) as error:
+        plan_cli.main()
+    assert error.value.code == 2

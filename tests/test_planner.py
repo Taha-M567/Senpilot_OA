@@ -164,11 +164,12 @@ def test_refusal_incomplete_or_malformed_response_is_visible_failure(llm, browse
     ValueError('test-key-must-not-be-logged'),
 ])
 def test_api_errors_and_timeouts_never_fallback_or_leak_credentials(llm, browser, tmp_path, error, at_ranking):
-    llm.side_effect = [response(interpretation()), error] if at_ranking else error
+    attempts = 3 if planner.retry_delay(error, 1) is not None else 1
+    llm.side_effect = ([response(interpretation())] if at_ranking else []) + [error] * attempts
     directory, report = asyncio.run(planner.plan_email('M12205', tmp_path))
     assert report['status'] == 'failed'
     assert report['ranked_selections'] == []
-    assert llm.await_count == (2 if at_ranking else 1)
+    assert llm.await_count == attempts + int(at_ranking)
     assert report['calls'][-1]['error_type'] == type(error).__name__
     if getattr(error, 'status_code', None):
         assert f'HTTP {error.status_code}' in report['error']['message']
@@ -353,6 +354,12 @@ def test_review_end_to_end_exact_downloads_real_extraction_and_mocked_reviews(ll
         assert archive.namelist() == [item['download']['filename'] for item in report['documents']]
         for item in report['documents']:
             assert archive.read(item['download']['filename']) == pdf_bytes([text])
+    llm.reset_mock()
+    _, resumed = asyncio.run(planner.resume_email(directory, timeout_ms=2000))
+    assert resumed['status'] == 'completed'
+    assert resumed['documents'] == report['documents']
+    assert resumed['archive'] == report['archive']
+    llm.assert_not_called()
 
 
 @pytest.mark.parametrize('status', ['clarification', 'failed'])
@@ -401,3 +408,101 @@ def test_metadata_only_mode_clarifies_content_questions_before_browser(llm, brow
     assert '--review' in report['clarification_question']
     browser[0].assert_not_called()
     assert llm.await_count == 1
+
+
+def test_transient_sdk_errors_retry_with_diagnostics_and_retry_after(no_retry_waits):
+    from openai import AsyncOpenAI
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        if len(requests) <= 2:
+            return httpx.Response(503 if len(requests) == 1 else 429,
+                headers={'Retry-After': '30' if len(requests) == 1 else '1'},
+                json={'error': {'message': 'temporary', 'type': 'unavailable'}})
+        return httpx.Response(200, json={'id':'recovered', 'object':'chat.completion','created':1,
+            'model':planner.DEFAULT_MODEL, 'choices':[{'index':0,'finish_reason':'stop',
+                'message':{'role':'assistant','content':interpretation().model_dump_json()}}]})
+
+    async def check():
+        calls = []
+        async with AsyncOpenAI(api_key='offline', base_url=planner.GEMINI_BASE_URL, max_retries=0,
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle))) as client:
+            answer = await planner._structured_call(client, planner.DEFAULT_MODEL, planner.EmailRequest,
+                planner.INTERPRET_PROMPT, {'email_text':'M12205'}, calls, 'interpret_email')
+        return answer, calls
+
+    answer, calls = asyncio.run(check())
+    assert answer.matter_numbers == ['M12205']
+    assert [x['attempt'] for x in calls] == [1,2,3]
+    assert [x.args for x in no_retry_waits.await_args_list] == [(30.0,), (15,)]
+    assert [x.get('status_code') for x in calls] == [503,429,None]
+
+
+def test_retry_after_http_date_and_long_cooldown():
+    from datetime import datetime, timedelta, timezone
+    from email.utils import format_datetime
+    request = httpx.Request('POST', planner.GEMINI_BASE_URL)
+    def error(value):
+        return RateLimitError('temporary', response=httpx.Response(429,
+            headers={'Retry-After':value}, request=request), body=None)
+    delay = planner.retry_delay(error(format_datetime(datetime.now(timezone.utc)+timedelta(seconds=60))), 1)
+    assert 55 < delay <= 60
+    assert planner.retry_delay(error('600'), 1) is None
+    assert planner.retry_delay(error('bad date'), 1) == 5
+    assert planner.retry_delay(ValueError('invalid output'), 1) is None
+
+
+def test_resume_ranking_reuses_interpretation_and_complete_inventory(llm, browser, tmp_path):
+    error = InternalServerError('temporary', response=httpx.Response(503,
+        request=httpx.Request('POST', planner.GEMINI_BASE_URL)), body=None)
+    llm.side_effect = [response(interpretation()), error, error, error]
+    directory, failed = asyncio.run(planner.plan_email('M12205', tmp_path))
+    assert failed['status'] == 'failed' and failed['inventory_complete']
+    llm.reset_mock()
+    browser[0].reset_mock()
+    llm.side_effect = [response(planner.Ranking(selections=[
+        planner.Selection(candidate_id='C0001', reason='Order title')]))]
+    resumed_directory, resumed = asyncio.run(planner.resume_email(directory))
+    assert resumed_directory == directory.resolve()
+    assert resumed['status'] == 'completed'
+    assert llm.await_count == 1
+    assert llm.call_args.kwargs['response_format'] is planner.Ranking
+    browser[0].assert_not_called()
+    llm.reset_mock()
+    _, complete = asyncio.run(planner.resume_email(directory))
+    assert complete['status'] == 'completed'
+    llm.assert_not_called()
+
+
+def test_invalid_resume_checkpoint_prevents_browser_and_api(llm, browser, tmp_path):
+    llm.side_effect = [response(interpretation()), response(planner.Ranking(selections=[]))]
+    directory, plan = asyncio.run(planner.plan_email('M12205', tmp_path))
+    plan['ranked_selections'] = [{**plan['candidate_inventory'][0], 'document_number':'invented', 'reason':'Order'}]
+    (directory/'plan.json').write_text(json.dumps(plan))
+    llm.reset_mock()
+    browser[0].reset_mock()
+    with pytest.raises(ValueError, match='selections differ'):
+        asyncio.run(planner.resume_email(directory))
+    llm.assert_not_called()
+    browser[0].assert_not_called()
+
+
+def test_interrupted_inventory_resumes_after_saved_interpretation(llm, browser, tmp_path):
+    llm.return_value = response(interpretation())
+    browser[0].side_effect = asyncio.CancelledError()
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(planner.plan_email('Priority M12205 documents', tmp_path))
+    directory = next(tmp_path.glob('*/plan.json')).parent
+    checkpoint = json.loads((directory/'plan.json').read_text())
+    assert checkpoint['interpreted_request']['matter_numbers'] == ['M12205']
+    assert not checkpoint['inventory_complete']
+    async def inspect(output, **options):
+        return output/'resumed', deepcopy(browser[1])
+    browser[0].side_effect = inspect
+    llm.reset_mock()
+    llm.return_value = response(planner.Ranking(selections=[]))
+    _, report = asyncio.run(planner.resume_email(directory))
+    assert report['status'] == 'completed'
+    assert llm.await_count == 1
+    assert llm.call_args.kwargs['response_format'] is planner.Ranking

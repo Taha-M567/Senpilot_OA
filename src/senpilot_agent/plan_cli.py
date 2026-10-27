@@ -5,7 +5,7 @@ import asyncio
 from pathlib import Path
 import sys
 
-from .planner import plan_email
+from .planner import plan_email, resume_email
 from .email_flow import process_emails, read_emails
 
 
@@ -14,7 +14,8 @@ def main() -> int:
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument('--email-file', help='UTF-8 text file, or - for standard input')
     source.add_argument('--emails-json', help='JSON inbox with emails keyed by ID, or - for standard input')
-    parser.add_argument('--limit', type=int, default=10, help='Maximum recommendations (1-10; default: 10)')
+    source.add_argument('--resume', type=Path, help='Resume a saved single-request workflow directory')
+    parser.add_argument('--limit', type=int, help='Maximum recommendations (1-10; default: 10)')
     parser.add_argument('--review', action='store_true', help='Download the shortlist, review PDF text, and create a ZIP')
     parser.add_argument('--output', type=Path, default=Path('artifacts'))
     parser.add_argument('--headed', action='store_true', help='Show the browser for debugging')
@@ -22,8 +23,11 @@ def main() -> int:
     parser.add_argument('--timeout-ms', type=int, default=30_000)
     parser.add_argument('--inspect-seconds', type=int, default=0)
     args = parser.parse_args()
-    if not 1 <= args.limit <= 10:
+    if args.resume is not None and args.limit is not None:
+        parser.error('--resume retains the saved shortlist and limit; omit --limit')
+    if args.limit is not None and not 1 <= args.limit <= 10:
         parser.error('--limit must be between 1 and 10')
+    args.limit = args.limit or 10
     if not 1000 <= args.timeout_ms <= 120_000:
         parser.error('--timeout-ms must be between 1000 and 120000')
     if not 0 <= args.inspect_seconds <= 60:
@@ -31,11 +35,11 @@ def main() -> int:
     input_path = args.emails_json if args.emails_json is not None else args.email_file
     input_flag = '--emails-json' if args.emails_json is not None else '--email-file'
     try:
-        email_text = (sys.stdin.read() if input_path == '-'
+        email_text = ('' if args.resume is not None else sys.stdin.read() if input_path == '-'
                       else Path(input_path).read_text(encoding='utf-8-sig'))
     except (OSError, UnicodeError) as exc:
         parser.error(f'Cannot read {input_flag} ({type(exc).__name__})')
-    if not email_text.strip():
+    if args.resume is None and not email_text.strip():
         parser.error(f'{input_flag} must contain nonempty email input')
     if args.emails_json is not None:
         try:
@@ -55,11 +59,20 @@ def main() -> int:
         print(f"Replies: {directory.resolve() / 'replies.json'}")
         return exit_code
     try:
-        directory, report = asyncio.run(plan_email(
-            email_text, args.output, limit=args.limit, headed=args.headed, channel=args.channel,
-            timeout_ms=args.timeout_ms, inspect_seconds=args.inspect_seconds,
-            **({'review': True} if args.review else {}),
-        ))
+        if args.resume is not None:
+            directory, report = asyncio.run(resume_email(
+                args.resume, review=args.review, headed=args.headed, channel=args.channel,
+                timeout_ms=args.timeout_ms, inspect_seconds=args.inspect_seconds,
+            ))
+            args.review = 'documents' in report
+        else:
+            directory, report = asyncio.run(plan_email(
+                email_text, args.output, limit=args.limit, headed=args.headed, channel=args.channel,
+                timeout_ms=args.timeout_ms, inspect_seconds=args.inspect_seconds,
+                **({'review': True} if args.review else {}),
+            ))
+    except ValueError:
+        parser.error('Cannot resume: invalid workflow checkpoint')
     except OSError as exc:
         print(f'Cannot write planning output ({type(exc).__name__}).', file=sys.stderr)
         return 1

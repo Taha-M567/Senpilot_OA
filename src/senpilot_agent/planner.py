@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import json
 import os
 from pathlib import Path
@@ -9,11 +10,12 @@ import re
 from uuid import uuid4
 
 from dotenv import dotenv_values
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, APIConnectionError
 from pydantic import BaseModel, ConfigDict, Field
 
 from .downloads import CATEGORIES
 from .probe import inspect_site
+from .files import write_json
 
 
 PROMPT_VERSION = 'uarb-plan-gemini-v2'
@@ -77,6 +79,37 @@ class PlanningError(RuntimeError):
     pass
 
 
+async def retry_pause(seconds: float) -> None:
+    # Split long Retry-After waits so cancellation remains responsive.
+    while seconds > 0:
+        interval = min(seconds, 30)
+        await asyncio.sleep(interval)
+        seconds -= interval
+
+
+def retry_delay(exc: Exception, attempt: int) -> float | None:
+    """Three attempts, only for transient failures; never retry before Retry-After."""
+    status = getattr(exc, 'status_code', None)
+    if attempt >= 3 or not (status in {429, 500, 502, 503, 504}
+                           or isinstance(exc, (TimeoutError, APIConnectionError))):
+        return None
+    delay = (5, 15)[attempt - 1]
+    headers = getattr(getattr(exc, 'response', None), 'headers', {})
+    value = headers.get('retry-after')
+    if value:
+        try:
+            wait = float(value)
+        except ValueError:
+            try:
+                wait = (parsedate_to_datetime(value) - datetime.now(timezone.utc)).total_seconds()
+            except (TypeError, ValueError, OverflowError):
+                wait = 0
+        if not 0 <= wait <= 120:
+            return None  # Leave a long provider cooldown for an explicit later resume.
+        delay = max(delay, wait)
+    return delay
+
+
 def normalize_request(request: EmailRequest, email_text: str) -> EmailRequest:
     """Check model interpretation against local identifiers and category names."""
     request.matter_numbers = list(dict.fromkeys(value.strip().upper() for value in request.matter_numbers))
@@ -102,8 +135,22 @@ def normalize_request(request: EmailRequest, email_text: str) -> EmailRequest:
 
 async def _structured_call(client, model: str, schema, prompt: str, payload: dict,
                            calls: list[dict], stage: str, *, prompt_version: str = PROMPT_VERSION):
+    for attempt in range(1, 4):
+        try:
+            return await _structured_attempt(client, model, schema, prompt, payload, calls, stage,
+                                             prompt_version=prompt_version, attempt=attempt)
+        except PlanningError as error:
+            delay = retry_delay(error.__cause__, attempt) if error.__cause__ else None
+            if delay is None:
+                raise
+            calls[-1]['retry_delay_seconds'] = delay
+            await retry_pause(delay)
+
+
+async def _structured_attempt(client, model: str, schema, prompt: str, payload: dict,
+                              calls: list[dict], stage: str, *, prompt_version: str, attempt: int):
     """Never log raw API errors: their bodies can contain submitted text or secrets."""
-    diagnostic = {'stage': stage, 'prompt_version': prompt_version, 'model': model,
+    diagnostic = {'stage': stage, 'attempt': attempt, 'prompt_version': prompt_version, 'model': model,
                   'request_id': None, 'response_id': None, 'token_usage': None}
     calls.append(diagnostic)
     try:
@@ -156,18 +203,63 @@ def validate_selections(ranking: Ranking, inventory: list[dict], limit: int) -> 
     return selected
 
 
+def load_plan(directory: Path) -> dict:
+    """Validate a local checkpoint before it can select browser actions."""
+    from .downloads import validate_selected_records
+
+    path = directory / 'plan.json'
+    if not path.is_file() or path.is_symlink() or path.stat().st_size > 5 * 1024 * 1024:
+        raise ValueError('Invalid plan checkpoint')
+    plan = json.loads(path.read_text(encoding='utf-8'))
+    if (not isinstance(plan, dict) or plan.get('provider') != 'gemini'
+            or plan.get('status') not in {'starting', 'completed', 'failed', 'clarification'}):
+        raise ValueError('Invalid plan checkpoint')
+    if plan.get('interpreted_request'):
+        request = EmailRequest.model_validate(plan['interpreted_request'])
+        if (len(request.matter_numbers) != 1 or re.fullmatch(r'M[0-9]{5}', request.matter_numbers[0]) is None
+                or any(c not in CATEGORIES for c in request.categories) or not request.categories):
+            raise ValueError('Invalid checkpoint matter or categories')
+        if plan.get('inventory_complete'):
+            inventory = plan['candidate_inventory']
+            if (not isinstance(inventory, list) or len(inventory) > 1000
+                    or plan['matter_metadata']['matter_number'] != request.matter_numbers[0]
+                    or len({x['candidate_id'] for x in inventory}) != len(inventory)):
+                raise ValueError('Invalid checkpoint inventory')
+            for item in inventory:
+                validate_selected_records([item])
+                if not set(item['categories']).issubset(request.categories):
+                    raise ValueError('Checkpoint inventory exceeds category restrictions')
+            limit = plan['result_limit']
+            if type(limit) is not int or not 1 <= limit <= min(10, request.requested_count or 10):
+                raise ValueError('Invalid checkpoint result limit')
+            selected = plan.get('ranked_selections', [])
+            resolved = validate_selections(Ranking(selections=[Selection.model_validate({
+                'candidate_id': x['candidate_id'], 'reason': x['reason']}) for x in selected]), inventory, limit)
+            if selected != resolved:
+                raise ValueError('Checkpoint selections differ from their inventory')
+            if selected:
+                validate_selected_records(selected)
+    elif not plan.get('email_text'):
+        raise ValueError('Checkpoint has no request to resume')
+    if plan['status'] == 'completed' and not plan.get('inventory_complete'):
+        raise ValueError('Completed checkpoint has no complete inventory')
+    return plan
+
+
 async def _plan_email(email_text: str, output: Path = Path('artifacts'), *, limit: int = 10,
                      headed: bool = False, channel: str | None = None,
-                     timeout_ms: int = 30_000, inspect_seconds: int = 0, review: bool = False) -> tuple[Path, dict]:
+                     timeout_ms: int = 30_000, inspect_seconds: int = 0, review: bool = False,
+                     resume_directory: Path | None = None) -> tuple[Path, dict]:
     """Save and return a completed, clarification, or failed metadata-only plan.
 
     GEMINI_API_KEY and optional GEMINI_MODEL come from the environment or cwd/.env.
     Process environment values take precedence over the file without being mutated.
     Browser evidence lives below browser/; plan.json never contains API credentials.
     """
-    directory = Path(output) / (datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
-                                + '_' + uuid4().hex[:8])
-    directory.mkdir(parents=True, exist_ok=False)
+    directory = (Path(resume_directory).resolve() if resume_directory is not None else
+                 Path(output) / (datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '_' + uuid4().hex[:8]))
+    if resume_directory is None:
+        directory.mkdir(parents=True, exist_ok=False)
     report = {'status': 'starting', 'stage': 'validate_input',
               'started_at': datetime.now(timezone.utc).isoformat(),
               'basis': 'Recommendations use titles and metadata only; document contents were not reviewed.',
@@ -177,6 +269,19 @@ async def _plan_email(email_text: str, output: Path = Path('artifacts'), *, limi
               'interpreted_request': None, 'result_limit': None, 'matter_metadata': {},
               'category_counts': {}, 'candidate_inventory': [], 'ranked_selections': [],
               'calls': [], 'browser_evidence': None, 'inventory_complete': False}
+    if resume_directory is not None:
+        report = load_plan(directory)
+        email_text = report.get('email_text') or ' '.join(report['interpreted_request']['matter_numbers'])
+        limit = report.get('requested_limit', report.get('result_limit') or 10)
+        if report['status'] in {'completed', 'clarification'}:
+            return directory, report
+        report.pop('error', None)
+        report.update(status='starting', resumed_at=datetime.now(timezone.utc).isoformat())
+    else:
+        report.update(email_text=email_text if isinstance(email_text, str) else None,
+                      requested_limit=limit if type(limit) is int else None,
+                      review_enabled=review if type(review) is bool else False)
+    write_json(directory / 'plan.json', report)
     try:
         if (not isinstance(email_text, str) or not email_text.strip()
                 or type(limit) is not int or not 1 <= limit <= 10 or type(review) is not bool
@@ -198,9 +303,10 @@ async def _plan_email(email_text: str, output: Path = Path('artifacts'), *, limi
             capabilities = ('Selected downloads, a selected-file ZIP, and PDF text review are supported.' if review
                             else 'Only metadata recommendations are supported. Clarify requests for document '
                                  'contents, downloads, or ZIPs before browser launch.')
-            request = await _structured_call(client, report['model'], EmailRequest,
+            request = (EmailRequest.model_validate(report['interpreted_request']) if report['interpreted_request'] else
+                       await _structured_call(client, report['model'], EmailRequest,
                                              INTERPRET_PROMPT + '\nCapabilities: ' + capabilities,
-                                             {'email_text': email_text}, report['calls'], 'interpret_email')
+                                             {'email_text': email_text}, report['calls'], 'interpret_email'))
             request = normalize_request(request, email_text)
             if request.review_questions and not review:
                 request.clarification_question = 'Content questions require --review; should I download and review the selected PDFs?'
@@ -209,22 +315,25 @@ async def _plan_email(email_text: str, output: Path = Path('artifacts'), *, limi
                 report.update(status='clarification', clarification_question=request.clarification_question)
                 return directory, report
             report['result_limit'] = min(10, limit, request.requested_count or 10)
+            write_json(directory / 'plan.json', report)
             report['stage'] = 'collect_inventory'
-            evidence, browser = await inspect_site(
-                directory / 'browser', matter_number=request.matter_numbers[0],
-                inventory_categories=request.categories, headed=headed, channel=channel,
-                timeout_ms=timeout_ms, inspect_seconds=inspect_seconds,
-            )
-            report['browser_evidence'] = (evidence / 'report.json').relative_to(directory).as_posix()
-            for name in ('matter_metadata', 'category_counts', 'candidate_inventory',
-                         'inventory_category_counts', 'inventory_complete'):
-                if name in browser:
-                    report[name] = browser[name]
-            if browser['status'] == 'clarification':
-                report.update(status='clarification', clarification_question=browser['clarification_question'])
-                return directory, report
-            if browser['status'] != 'inventory_ready' or not report['inventory_complete']:
-                raise PlanningError(f"Browser inventory failed at {browser['stage']}; see browser evidence")
+            if not report['inventory_complete']:
+                evidence, browser = await inspect_site(
+                    directory / 'browser', matter_number=request.matter_numbers[0],
+                    inventory_categories=request.categories, headed=headed, channel=channel,
+                    timeout_ms=timeout_ms, inspect_seconds=inspect_seconds,
+                )
+                report['browser_evidence'] = (evidence / 'report.json').relative_to(directory).as_posix()
+                for name in ('matter_metadata', 'category_counts', 'candidate_inventory',
+                             'inventory_category_counts', 'inventory_complete'):
+                    if name in browser:
+                        report[name] = browser[name]
+                if browser['status'] == 'clarification':
+                    report.update(status='clarification', clarification_question=browser['clarification_question'])
+                    return directory, report
+                if browser['status'] != 'inventory_ready' or not report['inventory_complete']:
+                    raise PlanningError(f"Browser inventory failed at {browser['stage']}; see browser evidence")
+                write_json(directory / 'plan.json', report)
             if report['candidate_inventory']:
                 report['stage'] = 'rank_candidates'
                 ranking = await _structured_call(
@@ -242,7 +351,7 @@ async def _plan_email(email_text: str, output: Path = Path('artifacts'), *, limi
         report.update(status='failed', error={'type': type(exc).__name__, 'message': message})
     finally:
         report['finished_at'] = datetime.now(timezone.utc).isoformat()
-        (directory / 'plan.json').write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding='utf-8')
+        write_json(directory / 'plan.json', report)
     return directory, report
 
 
@@ -259,26 +368,66 @@ async def plan_email(email_text: str, output: Path = Path('artifacts'), *, limit
     directory, plan = await _plan_email(email_text, output, limit=limit, review=review, **options)
     if not review:
         return directory, plan
+    return directory, await _review_plan(directory, plan, **options)
+
+
+async def resume_email(directory: Path, *, review: bool = False, headed: bool = False,
+                       channel: str | None = None, timeout_ms: int = 30_000,
+                       inspect_seconds: int = 0) -> tuple[Path, dict]:
+    """Resume one workflow directory without rerunning completed planning stages."""
+    directory = Path(directory).resolve()
+    try:
+        from .review import saved_path
+        for name in ('downloads', 'extracted', 'browser', 'retrieval_browser', 'review.json', 'review.md'):
+            saved_path(directory, name)
+        saved = load_plan(directory)
+        review = review or saved.get('review_enabled', False) or (directory / 'review.json').exists()
+    except (KeyError, TypeError) as exc:
+        raise ValueError('Invalid workflow checkpoint') from exc
+    if (not 1000 <= timeout_ms <= 120_000 or not 0 <= inspect_seconds <= 60
+            or channel not in {None, 'chrome', 'msedge'}):
+        raise ValueError('Invalid browser options')
+    options = dict(headed=headed, channel=channel, timeout_ms=timeout_ms, inspect_seconds=inspect_seconds)
+    directory, plan = await _plan_email('', review=review, resume_directory=directory, **options)
+    if not review:
+        return directory, plan
+    return directory, await _review_plan(directory, plan, resume=True, **options)
+
+
+async def _review_plan(directory: Path, plan: dict, *, resume: bool = False, **options) -> dict:
     from .review import review_selected, save_review
 
     if plan['status'] != 'completed' or not plan['ranked_selections']:
-        return directory, await review_selected(directory, plan, None, _structured_call, **options)
+        return await review_selected(directory, plan, None, _structured_call, **options)
     review_report = None
     try:
         settings = dotenv_values(Path.cwd() / '.env', encoding='utf-8-sig')
         key = os.environ.get('GEMINI_API_KEY', settings.get('GEMINI_API_KEY'))
         if not key or not key.strip():
+            if resume:
+                async def missing_key(*args, **kwargs):
+                    raise PlanningError('Set GEMINI_API_KEY before resuming unfinished reviews')
+                return await review_selected(directory, plan, None, missing_key, resume=True, **options)
             raise PlanningError('GEMINI_API_KEY is missing before document review')
+        if resume:
+            plan = {**plan, 'model': os.environ.get('GEMINI_MODEL', settings.get('GEMINI_MODEL') or plan['model'])}
+            if not plan['model'] or not plan['model'].strip():
+                raise PlanningError('GEMINI_MODEL must be nonempty')
         async with AsyncOpenAI(api_key=key, base_url=GEMINI_BASE_URL, timeout=60.0, max_retries=0) as client:
-            review_report = await review_selected(directory, plan, client, _structured_call, **options)
-        return directory, review_report
-    except OSError:
+            review_report = await review_selected(directory, plan, client, _structured_call, resume=resume, **options)
+        return review_report
+    except (OSError, ValueError):
         raise
     except Exception as exc:
         if review_report is not None:
             review_report.update(status='partial_review', error={'message': f'Review client cleanup failed ({type(exc).__name__})'})
             save_review(directory, review_report)
-            return directory, review_report
+            return review_report
+        if resume:
+            error_type = type(exc).__name__
+            async def unavailable(*args, **kwargs):
+                raise PlanningError(f'Review setup failed ({error_type}); saved completed work was retained')
+            return await review_selected(directory, plan, None, unavailable, resume=True, **options)
         failure = {**plan, 'status': 'failed', 'stage': 'configure_review',
                    'error': {'message': f'Review setup failed ({type(exc).__name__})'}}
-        return directory, await review_selected(directory, failure, None, _structured_call, **options)
+        return await review_selected(directory, failure, None, _structured_call, **options)

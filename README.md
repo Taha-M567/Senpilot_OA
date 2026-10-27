@@ -140,14 +140,56 @@ PDF extraction limits are 20 MiB, 100 pages, 100,000 extracted characters,
 corrupt, unsupported, over-limit, and partially unreadable files remain explicitly
 unreviewed. OCR, images, diagrams, and visual layout are outside the review scope.
 
-Each eligible PDF gets one Gemini call using excerpts covering all its extracted
+Each eligible PDF gets one logical Gemini review using excerpts covering all its extracted
 text. The model cites stable source IDs; the application resolves them to local
 quotations and physical page numbers, then checks the evidence before publishing
 up to five findings. Citation checks establish traceability; human judgment is
 still needed to assess interpretations. Rejected output stays diagnostic data.
 Calls use the configured Gemini model through Google's OpenAI-compatible
-endpoint, structured output, low reasoning effort, a 60-second deadline, and no
-automatic retries or model fallback.
+endpoint, structured output, low reasoning effort, and a 60-second deadline per
+attempt. Temporary HTTP 429/500/502/503/504 errors, connection failures, and
+timeouts get at most three attempts with 5/15-second backoff. `Retry-After`
+seconds and HTTP dates are respected; cooldowns over 120 seconds stop for a later
+resume. Refusals, malformed output, invented IDs, and invalid citations are not
+automatically retried. The configured model is retained; there is no model fallback.
+
+## Retry and resume
+
+Review-mode downloads retry temporary timeouts in fresh browser sessions. Closing
+the timed-out session cancels its pending requests. Each new session verifies the
+matter and exact selected number/title/date again. Each file gets at most three
+attempts, with 5 seconds before the first recovery session and 15 seconds before
+subsequent sessions. Unattempted files go ahead of a stalled file, so one failed
+download cannot block the rest. Changed, missing, and ambiguous identities fail
+without retries or substitutes. The standalone `senpilot-probe` command retains
+its existing behavior.
+
+Resume a single workflow directory printed by the CLI:
+
+```powershell
+.\.venv\Scripts\senpilot-plan.exe --resume artifacts\RUN_DIRECTORY --timeout-ms 60000
+```
+
+Review mode is inferred from the saved workflow, or can be enabled with `--review`.
+Do not supply a new email or `--limit`: resume retains the original request,
+inventory, shortlist, and limit. Each resume provides another bounded recovery
+window. For a JSON inbox, resume an individual email's workflow directory.
+
+Checkpoints are replaced atomically after interpretation, complete inventory
+collection, each successful download, extraction, and each reviewed document.
+Completed planning stages are skipped. Verified files and compatible completed
+reviews are reused; only unfinished work invokes the browser or Gemini. Download
+checksums, extraction checksums/source bindings, and quotation/page citations are
+validated before reuse. Changed or missing local evidence is rebuilt; paths outside
+the run and symlinks/junctions are not followed. Older reports without extraction
+checksums keep their valid downloads but rebuild extraction and content review.
+
+Existing ZIPs are reused only if they exactly match the verified files; when the
+file set changes, a new uniquely named ZIP is created and the old ZIP is retained.
+The current `GEMINI_MODEL` setting applies to unfinished calls, while completed
+reviews and their original per-call model diagnostics remain saved. API keys are
+never stored. New `plan.json` checkpoints include the original email text so an
+interrupted interpretation can resume; treat output directories as private data.
 
 ## Outputs and failures
 
@@ -172,7 +214,8 @@ partial failure, and failed reviews never become metadata summaries.
 Exit codes: `0` for completion (including no matches), `2` for invalid input or
 clarification, `1` for failures or partial completion. A JSON batch exits `1` if
 any email fails, otherwise `2` if any needs clarification, otherwise `0`. It has
-no automatic resume. An output-writing failure also exits `1`.
+no automatic batch resume; individual workflow directories support `--resume`.
+An output-writing failure also exits `1`.
 
 ## Inspect or download without AI
 
@@ -193,6 +236,8 @@ writes `report.json` and browser evidence under `artifacts/`. To view a trace:
 
 The reusable async API is `senpilot_agent.planner.plan_email(email_text,
 Path("artifacts"), limit=10, review=True)`, returning `(directory, report)`.
+Use `senpilot_agent.planner.resume_email(Path("artifacts/RUN_DIRECTORY"))` to
+continue saved work with the same return type.
 Without the installed entry points, run `python -m senpilot_agent.plan_cli` or
 `python -m senpilot_agent.cli` from the virtual environment.
 
@@ -205,10 +250,18 @@ Without the installed entry points, run `python -m senpilot_agent.plan_cli` or
 Tests use offline browser fixtures, generated PDFs, and mocked Gemini responses.
 They cover inventory completeness, exact selected downloads, extraction limits,
 citation validation, partial failures, inbox processing, and end-to-end flows.
-Live lookup, full metadata planning, selected downloads, and individual PDF
-reviews have succeeded in prior runs. Complete fresh live content-review
-acceptance remains unverified: previous attempts encountered Gemini HTTP 503
-responses and UARB download timeouts.
+The final recovery implementation passed all 274 tests, including interrupted-run
+resume, bounded retries, changed evidence, prompt upgrades, and fresh-session downloads.
+Live acceptance succeeded on October 27, 2026, for M12205 across all five
+categories: 56 unique candidates, four selected PDFs downloaded and reviewed
+(38 physical pages), and a verified four-file ZIP. Transient Gemini 503s recovered
+through the bounded retries without changing models. Content review was then
+regenerated with stricter actor/date grounding instructions using the saved PDFs
+and extraction. Completed-run resume made zero new API calls or retrieval sessions
+and preserved the archive hash. Local evidence is in
+`artifacts/20261027T190052Z_9c9711f4/verification.json` and `review.json` (ignored by
+Git). File and citation checks establish traceability; AI interpretations still
+require human judgment.
 
 `src/`, `tests/`, `examples/`, and the assignment PDF support the pipeline and its
 verification. `.env` holds local credentials; `.venv/` and

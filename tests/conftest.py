@@ -1,10 +1,21 @@
 import base64
 from io import BytesIO
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
 from senpilot_agent import probe
+
+
+@pytest.fixture(autouse=True)
+def no_retry_waits(monkeypatch):
+    """Exercise real retry branches without spending provider cooldowns offline."""
+    from senpilot_agent import planner, review
+    pause = AsyncMock()
+    monkeypatch.setattr(planner, 'retry_pause', pause)
+    monkeypatch.setattr(review, 'retry_pause', pause)
+    return pause
 
 
 @pytest.fixture

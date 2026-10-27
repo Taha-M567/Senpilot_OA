@@ -34,6 +34,7 @@ async def inspect_site(
     matter_number: str | None = None, category: str | None = None, limit: int = 10,
     inventory_categories: list[str] | None = None,
     selected_records: list[dict] | None = None, download_directory: Path | None = None,
+    restart_on_download_timeout: bool = False, download_callback=None,
 ) -> tuple[Path, dict]:
     """Capture live DOM and controls, or a truthful failure report.
 
@@ -169,7 +170,8 @@ async def inspect_site(
                     if selected_records is not None:
                         from .downloads import retrieve_selected_documents
                         await retrieve_selected_documents(page, download_directory or run_dir, report,
-                                                          selected_records, timeout_ms)
+                            selected_records, timeout_ms, restart_on_timeout=restart_on_download_timeout,
+                            download_callback=download_callback)
                 if inspect_seconds:
                     # Explicit human inspection window, not a readiness heuristic.
                     import asyncio

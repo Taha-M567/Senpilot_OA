@@ -34,7 +34,8 @@ def validate_selected_records(records: list[dict]) -> None:
 
 
 async def retrieve_selected_documents(page, run_dir: Path, report: dict,
-                                      records: list[dict], timeout_ms: int) -> None:
+                                      records: list[dict], timeout_ms: int, *,
+                                      restart_on_timeout: bool = False, download_callback=None) -> None:
     """Recheck complete category lists before downloading exact selected identities."""
     from .inventory import collect_inventory, grid_pages
 
@@ -78,8 +79,22 @@ async def retrieve_selected_documents(page, run_dir: Path, report: dict,
                         evidence = await _download_row(page, row, run_dir, timeout_ms)
                         report['downloads'].append({**item, **evidence, 'download_category': category})
                         report['downloaded_document_count'] = len(report['downloads'])
+                        if download_callback is not None:
+                            await download_callback(report['downloads'][-1])
                     except Exception as exc:
-                        report['download_errors'].append({**item, 'type': type(exc).__name__, 'message': str(exc)})
+                        from playwright.async_api import TimeoutError as BrowserTimeout
+                        timed_out = isinstance(exc, (TimeoutError, BrowserTimeout))
+                        report['download_errors'].append({**item, 'type': type(exc).__name__,
+                                                          'message': str(exc), 'retryable': timed_out})
+                        if timed_out and restart_on_timeout:
+                            # Returning closes the context, cancelling its stalled connection.
+                            attempted = {x['candidate_id'] for x in report['downloads'] + report['download_errors']}
+                            for remaining in records:
+                                if remaining['candidate_id'] not in attempted:
+                                    report['download_errors'].append({**remaining,
+                                        'type': 'SessionRestartRequired', 'retryable': True,
+                                        'message': 'Session closed after a stalled download; retry in a fresh session'})
+                            return
                         dialog = page.get_by_role('dialog', name='Download Files', exact=True)
                         if await dialog.is_visible():
                             await dialog.get_by_role('button', name='Close', exact=True).click()
