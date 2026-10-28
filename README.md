@@ -244,8 +244,16 @@ interrupted interpretation can resume; treat output directories as private data.
 ## Outputs and failures
 
 Each run creates a batch directory under `artifacts/`, containing `replies.json`
-and a separate workflow directory for each email. Other paths below are relative
-to an individual email's workflow directory:
+and a separate workflow directory for each email.
+
+The runner creates timestamped batch/workflow directories under `artifacts/` by
+default, or under the path explicitly supplied with `--output`. It does not run
+tests or create `test-pre-push` / `test-capture-removal` folders automatically;
+those names are not configured in the repository. `artifacts/demo/` holds the
+optional, previously prepared showcase runs and manually recorded verification
+notes. It is used only when a demo command explicitly chooses that output path.
+
+Other paths below are relative to an individual email's workflow directory:
 
 | Output | Contents |
 |---|---|
