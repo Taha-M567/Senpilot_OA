@@ -83,7 +83,7 @@ def test_batch_includes_subject_preserves_ids_and_saves_reply_before_next_email(
 
 def test_review_reply_includes_only_published_findings_and_local_attachment_paths(tmp_path):
     report = {'status': 'partial_review', 'basis': 'PDF text only.', 'documents': [
-        document(status='reviewed', download={'relative_path': 'downloads/order.pdf'}, review={
+        document(status='reviewed', download={'relative_path': 'downloads/order.pdf', 'sha256': 'a' * 64}, review={
             'relevance': 'matches', 'findings': [{'statement': 'Approval requires reports.',
                 'citations': [{'page': 2, 'quote': 'Semi-annual reports are required.'}]}],
             'limitations': ['Images were not reviewed.']}),
@@ -91,7 +91,12 @@ def test_review_reply_includes_only_published_findings_and_local_attachment_path
                  download={'relative_path': 'downloads/decision.pdf'}, review=None,
                  error={'message': 'Gemini review failed (HTTP 503).'},
                  rejected_review={'findings': [{'statement': 'UNVERIFIED CLAIM'}]}),
-    ], 'archive': {'relative_path': 'M12205_selected_documents.zip'}}
+        document(document_number='789', title='Scanned appendix', status='unreviewed',
+                 download={'relative_path': 'downloads/scan.pdf'}, review=None,
+                 extraction={'status': 'incomplete_text', 'page_count': 3, 'complete_text': False,
+                    'warnings': ['Some pages may contain scanned images.'], 'unreadable_pages': [2]}),
+    ], 'archive': {'relative_path': 'M12205_selected_documents.zip'},
+       'downloaded_count': 3, 'reviewed_count': 1, 'failed_count': 2}
     reply = email_flow.format_reply('Order request', tmp_path, report)
     body = reply['content']
     assert 'partially complete' in body
@@ -101,7 +106,13 @@ def test_review_reply_includes_only_published_findings_and_local_attachment_path
     assert 'Images were not reviewed.' in body
     assert 'Gemini review failed (HTTP 503).' in body
     assert 'UNVERIFIED CLAIM' not in body
-    for path in ('downloads/order.pdf', 'downloads/decision.pdf', 'M12205_selected_documents.zip', 'review.json'):
+    assert 'Downloaded: 3; reviewed: 1; failed: 2.' in body
+    assert 'SHA-256: ' + 'a' * 64 in body
+    assert 'PDF text extraction: incomplete_text; pages: 3; complete text coverage: no.' in body
+    assert 'Extraction limitation: Some pages may contain scanned images.' in body
+    assert 'Pages without usable text: 2' in body
+    for path in ('downloads/order.pdf', 'downloads/decision.pdf', 'downloads/scan.pdf',
+                 'M12205_selected_documents.zip', 'review.json'):
         assert str((tmp_path / path).resolve()) in body
 
 

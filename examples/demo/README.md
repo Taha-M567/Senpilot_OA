@@ -1,13 +1,13 @@
 # Five-minute headed showcase
 
 The local rehearsal has been prepared and verified. Open
-[READY.md](../../artifacts/demo/READY.md) for its report, original PDF, ZIP, JSON
-reply, and exact commands. The email-driven headed hero run took **62.47 seconds**; its
+[READY.md](../../artifacts/demo/READY.md) for its JSON reply, original PDF, ZIP,
+and exact commands. The email-driven headed hero run took **62.47 seconds**; its
 completed-run resume used zero new API calls or browser sessions. Those outputs
 are local, ignored artifacts; on another machine, rehearse the command below first.
 
 The hero request asks for one known, short PDF from M12205. Rehearse it before
-presenting so its real report, PDF, ZIP, and JSON reply are already available.
+presenting so its PDF, ZIP, and JSON reply are already available.
 During the presentation, start a **fresh headed run** of that same request and
 show the prepared results while the visible browser works. This avoids waiting
 for fresh Gemini/UARB responses to finish before discussing the output.
@@ -26,9 +26,11 @@ $env:PLAYWRIGHT_BROWSERS_PATH = "$PWD\.cache\ms-playwright"
 .\.venv\Scripts\senpilot-plan.exe --emails-json examples/demo/hero.json --headed --inspect-seconds 8 --timeout-ms 20000 --output artifacts/demo/hero
 ```
 
-After it completes, open the printed `replies.json`. Its detailed-report path
-points to the individual workflow directory containing `review.md`, `plan.json`,
-the PDF in `downloads/`, and the ZIP. Keep those files open for the presentation.
+After it completes, open the printed `replies.json`. Each email's `content`
+contains the readable findings, citations, coverage limitations, errors, and
+file/ZIP paths. Keep that reply, its PDF, and its ZIP open for the presentation.
+There is no Markdown review file. The linked `plan.json`/`review.json` files are
+internal checkpoints rather than additional human-facing reports.
 Each rerun creates a separate directory, preserving the rehearsal outputs.
 The email itself requests one document and asks content questions. The first LLM
 call extracts that count and enables download/review. There are no CLI count or
@@ -44,7 +46,7 @@ files, and the ZIP is a local attachment reference.
 |---|---|
 | 0:00-0:30 | Open `hero.json`: one exact order, natural-language questions, no invented substitute. |
 | 0:30-1:30 | Run the same command in a terminal; watch the live matter search, category grids, and retrieval when each browser opens. |
-| 1:30-2:45 | Switch to the prepared `review.md` and PDF: approved cost, reporting requirements, exact page citations. These are explicitly results from the rehearsal. |
+| 1:30-2:45 | Read the prepared `replies.json` content and open its PDF: approved cost, reporting requirements, exact page citations. These are explicitly results from the rehearsal. |
 | 2:45-3:30 | Open the prepared ZIP and `replies.json`: one file, same email ID, selection reason, findings, attachment path. |
 | 3:30-4:15 | Show prepared edge-case replies and the second-matter metadata results using the inputs below. |
 | 4:15-4:50 | Open the saved `plan.json`: show the extracted count, download/review flags, complete inventory, and locally enforced result limit. |

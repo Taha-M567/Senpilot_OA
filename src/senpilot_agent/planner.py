@@ -412,7 +412,7 @@ async def resume_email(directory: Path, *, review: bool | None = None, headed: b
     directory = Path(directory).resolve()
     try:
         from .review import saved_path
-        for name in ('downloads', 'extracted', 'browser', 'retrieval_browser', 'review.json', 'review.md'):
+        for name in ('downloads', 'extracted', 'browser', 'retrieval_browser', 'review.json'):
             saved_path(directory, name)
         saved = load_plan(directory)
         if 'download_enabled' not in saved and (directory / 'review.json').exists():

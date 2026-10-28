@@ -50,6 +50,11 @@ def format_reply(subject: str, directory: Path | None, report: dict) -> dict[str
     if report.get('error'):
         lines.extend(['', report['error']['message']])
     documents = report.get('documents', report.get('ranked_selections', []))
+    if all(name in report for name in ('downloaded_count', 'reviewed_count', 'failed_count')):
+        lines.extend(['', f"Downloaded: {report['downloaded_count']}; reviewed: {report['reviewed_count']}; "
+                      f"failed: {report['failed_count']}."])
+    if 'documents' in report and documents:
+        lines.append('Document order follows the initial title and metadata ranking.')
     if status == 'completed' and not documents:
         lines.extend(['', 'No matching documents were found.'])
     for index, item in enumerate(documents, 1):
@@ -60,8 +65,18 @@ def format_reply(subject: str, directory: Path | None, report: dict) -> dict[str
             lines.append(f"Processing status: {item['status'].replace('_', ' ')}")
         if item.get('download') and directory is not None:
             lines.append(f"Downloaded file: {(directory / item['download']['relative_path']).resolve()}")
+        if (item.get('download') or {}).get('sha256'):
+            lines.append(f"SHA-256: {item['download']['sha256']}")
         if item.get('error'):
             lines.append(item['error']['message'])
+        if item.get('extraction'):
+            extraction = item['extraction']
+            lines.append(f"PDF text extraction: {extraction['status']}; pages: {extraction['page_count']}; "
+                         f"complete text coverage: {'yes' if extraction['complete_text'] else 'no'}.")
+            for warning in extraction.get('warnings', []):
+                lines.append(f'Extraction limitation: {warning}')
+            if extraction.get('unreadable_pages'):
+                lines.append('Pages without usable text: ' + ', '.join(map(str, extraction['unreadable_pages'])))
         review = item.get('review')
         if item.get('status') == 'reviewed' and review:
             lines.append(f"Relevance: {review['relevance'].replace('_', ' ')}")

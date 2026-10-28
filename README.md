@@ -54,10 +54,13 @@ The JSON format is:
 ```
 
 Output is `artifacts/<batch-run>/replies.json`, with the same email IDs and
-`subject`/`content` fields. Replies include selection reasons, findings, physical
-PDF page citations, limitations, and local file paths when available. Each email
+`subject`/`content` fields. This is the human-facing output for every processed
+email: selection reasons, processing counts/status, findings, quotations, physical
+PDF page citations, extraction coverage/warnings, limitations, and local file/ZIP
+paths when available. There is no separate Markdown review report. Each email
 gets its own workflow directory. Emails run in order; replies are saved after
-each completes, and a failed email does not prevent the next from running.
+each completes. Ordinary processing failures become failure replies and allow the
+next email to run; a failure to write the reply file stops the batch.
 Extra fields, duplicate keys, empty inboxes, and blank IDs/subjects/bodies are
 rejected before browser or AI work. Local paths serve as attachment references.
 
@@ -91,38 +94,80 @@ present, are indexed in [the demo results](artifacts/demo/READY.md).
 
 ```mermaid
 flowchart TD
-    Input[JSON inbox file] --> Interpret[Gemini interprets each email]
+    Input[JSON inbox file] --> Inbox[Validate the entire inbox]
+    Inbox --> Interpret[Gemini interprets the next email]
     Interpret --> Validate[Validate matter, categories, and limits]
     Validate --> Inventory[Playwright verifies the matter and collects the complete inventory]
-    Inventory --> Rank[Gemini ranks real document IDs using titles and metadata]
+    Inventory --> Rank[Gemini ranks real IDs if the inventory is nonempty]
     Rank --> Plan[Save plan.json]
-    Plan --> Files{Email requested files or review?}
-    Files -->|No| Reply[Return recommendations or JSON reply]
+    Plan --> Files{Files requested and shortlist nonempty?}
+    Files -->|No| Reply[Format email reply with results, citations and file links]
     Files -->|Yes| Download[Fresh browser session downloads exact selected records]
     Download --> Review{Email requested content review?}
-    Review -->|No| Output[Save document report and selected-file ZIP]
-    Review -->|Yes| Extract[Extract all readable PDF text with physical page numbers]
-    Extract --> Findings[Gemini reviews each eligible PDF; validate source citations]
-    Findings --> Output
+    Review -->|No| Output[Save internal checkpoint and selected-file ZIP]
+    Review -->|Yes| Documents[One file at a time: extract text, review eligible text, validate citations]
+    Documents --> Output
     Output --> Reply
+    Reply --> Save[Save replies.json before starting the next email]
 ```
 
-Steps run sequentially. The request handler waits for the complete inventory
-before ranking, all download attempts before extraction, and each PDF's
-extraction and review before starting the next. `async`/`await` allows waiting
-for browser/API work; it does not make these steps parallel.
+The diagram shows the successful paths. Clarification and failure outcomes can
+return earlier; empty inventories skip ranking, and empty shortlists skip file
+retrieval. No empty ZIP is created.
+
+### Async I/O and sequential execution
+
+The CLI starts one event loop with `asyncio.run(process_emails(...))` and waits
+for the batch to finish before exiting. The workflow uses async I/O, but it does
+not schedule emails, downloads, or reviews in parallel. There is no application
+fan-out through `asyncio.gather`, `create_task`, or a pool of document workers.
+
+| Work | Implementation | Execution order |
+|---|---|---|
+| Inbox reading, JSON/schema checks, request normalization, selection and citation validation | Synchronous Python in `plan_cli.py`, `email_flow.py`, `planner.py`, and `review.py` | The entire inbox is checked first; each later check runs inline before its dependent stage. |
+| Gemini interpretation, ranking, and content reviews | Async SDK requests awaited by `_structured_call` in `planner.py` | Interpretation finishes before browser inventory collection; ranking waits for the complete inventory; reviews run one document at a time. |
+| Browser launch, navigation, UI readiness, category/grid traversal, and downloads | Awaited Playwright operations in `probe.py`, `inventory.py`, and `downloads.py` | One active workflow browser session at a time; categories, grid pages, and selected files are visited sequentially. |
+| PDF extraction | `content.py` starts a subprocess with `asyncio.create_subprocess_exec` and awaits `process.communicate()` | The child parses that PDF synchronously with pypdf; the parent waits for it before reviewing that document or starting the next one. |
+| Retry backoff and the optional inspection pause | Awaited `asyncio.sleep` | The current workflow pauses before retrying or closing the inspected browser; no other email/document job is started during that wait. |
+| File integrity checks, SHA-256 hashing, ZIP compression/CRC checks, report formatting, checkpoint writes, and reply-file replacement | Synchronous calls in `files.py`, `review.py`, `content.py`, and `email_flow.py` | They run inline on the parent process and can block its event-loop thread until they finish. |
+
+For each email, the order is:
+
+1. Await interpretation, then validate the request and resolve its count and
+   download/review flags locally.
+2. Await matter verification and complete inventory traversal, then await ranking
+   when candidates exist. Validate the returned IDs and save the metadata plan.
+3. If files were requested, finish the selected-file download attempts and bounded
+   recovery sessions. A successful download is checkpointed immediately, but PDF
+   extraction does not overlap downloads.
+4. If content review was requested, process downloaded files in rank order:
+   verify the file, await extraction of that file, await its content review when
+   text is eligible, validate citations, and checkpoint the outcome. Only then
+   start the next file. Unsupported or incomplete extractions skip the model call.
+5. Recheck the successful downloads, create or reuse their ZIP synchronously, and
+   save the internal document checkpoint. Download-only requests skip step 4 and still create
+   a ZIP when files were successfully downloaded.
+6. Format and save the readable response in `replies.json` synchronously, then start the next email in the
+   inbox's insertion order.
+
+`await` yields control while an operation is waiting, allowing browser/network
+events and subprocess communication to progress. Chromium may fetch its own
+resources concurrently, and the PDF child is a separate OS process. Neither
+creates parallel email or document processing in this repository. Batch duration
+therefore accumulates the work and retry delays across emails; async execution
+does not make the CLI return an immediate background-job result.
 
 | Module | Responsibility |
 |---|---|
 | `plan_cli.py` | Read a JSON inbox file, call the workflow, print output paths and exit status |
-| `email_flow.py` | Validate the inbox, process each subject/body, format replies from existing results |
+| `email_flow.py` | Validate the inbox, process each subject/body, format all human-facing results into JSON replies |
 | `planner.py` | Interpret and validate the request, collect inventory, rank candidates, save the plan, optionally start review |
 | `probe.py` | Start a restricted Playwright browser, search and verify the matter, read metadata/counts, dispatch listing or downloads, capture evidence |
 | `inventory.py` | Traverse complete virtual grids; merge identical number/title/date records across categories |
 | `downloads.py` | Select categories, recheck selected record identities, open download dialogs, save checked files |
 | `files.py` | Safe filenames, basic format checks, SHA-256 checksums, checked ZIP creation |
 | `content.py` | Extract PDF text in a disposable process with bounded time and size |
-| `review.py` | Prepare source excerpts, call Gemini, validate citations, save reports and the selected-document ZIP |
+| `review.py` | Prepare source excerpts, call Gemini, validate citations, save machine-readable checkpoints and the selected-document ZIP |
 
 The browser verifies the returned read-only matter number, then reads metadata
 and counts for Exhibits, Key Documents, Other Documents, Transcripts, and
@@ -137,6 +182,12 @@ inventory. Ranking rejects unknown or repeated candidate IDs, empty reasons,
 and selections above the result limit. An empty inventory skips ranking; an
 empty shortlist skips downloads and content review. The shortlist remains based
 on metadata even when content review is enabled.
+
+Natural-language title, topic, date, and ordering criteria are applied by the
+ranking model. Local validation checks inventory IDs, duplicates, and count limits;
+it does not prove that every semantic filtering choice is correct. The demo's
+exact-title stress case currently returns real but nonmatching records and is
+documented as a known limitation in the [demo notes](examples/demo/README.md).
 
 Review downloads use a fresh browser session, reverify the matter and counts,
 and match each selected number/title/date exactly. Shared records download once;
@@ -163,7 +214,7 @@ automatically retried. The configured model is retained; there is no model fallb
 
 ## Retry and resume
 
-Review-mode downloads retry temporary timeouts in fresh browser sessions. Closing
+Selected-file downloads retry temporary timeouts in fresh browser sessions. Closing
 the timed-out session cancels its pending requests. Each new session verifies the
 matter and exact selected number/title/date again. Each file gets at most three
 attempts, with 5 seconds before the first recovery session and 15 seconds before
@@ -173,9 +224,10 @@ without retries or substitutes. Checkpoint resume remains an internal Python
 capability for integrations and controlled tests; it has no separate CLI command.
 It retains the original request, inventory, shortlist, count, and execution mode.
 
-Checkpoints are replaced atomically after interpretation, complete inventory
+Plan/review checkpoints are replaced atomically after interpretation, complete inventory
 collection, each successful download, extraction, and each reviewed document.
-Completed planning stages are skipped. Verified files and compatible completed
+When the internal resume function is used, completed planning stages are skipped.
+Verified files and compatible completed
 reviews are reused; only unfinished work invokes the browser or Gemini. Download
 checksums, extraction checksums/source bindings, and quotation/page citations are
 validated before reuse. Changed or missing local evidence is rebuilt; paths outside
@@ -191,26 +243,32 @@ interrupted interpretation can resume; treat output directories as private data.
 
 ## Outputs and failures
 
-Each workflow creates a unique directory under `artifacts/`:
+Each run creates a batch directory under `artifacts/`, containing `replies.json`
+and a separate workflow directory for each email. Other paths below are relative
+to an individual email's workflow directory:
 
 | Output | Contents |
 |---|---|
+| `replies.json` (batch directory) | Human-readable response for each input email ID: results, counts/status, findings, citations, coverage limitations, errors, and file/ZIP paths |
 | `plan.json` | Interpreted request, metadata/counts, complete inventory, selections, model/call diagnostics |
 | `browser/<run>/` | Inventory browser JSON report, page text, and Playwright trace |
 | `downloads/` | Successfully validated selected files with unique safe filenames |
 | `extracted/<candidate_id>.json` | Text by physical page, extraction status, and coverage warnings |
-| `review.json` | Final per-document download/extraction/review results, citations, checksums, errors, and workflow status |
-| `review.md` | Readable findings and local file/page links |
+| `review.json` | Internal checkpoint: per-document results, citations, checksums, errors, model diagnostics, and workflow status |
 | `<matter>_selected_documents.zip` | Successful selected downloads, including files whose review failed |
 | `retrieval_browser/<run>/` | Separate evidence from the fresh retrieval session |
 
-Document outputs (`review.json`, `review.md`, downloads, and ZIP) are created when
-the email requests downloads or review. For a
-download-only request, the report explicitly says contents were not reviewed;
+Document outputs (`review.json`, downloads, and ZIP) belong to the
+download/review path. Internal checkpoints may be written for failed or empty requests without
+any downloaded files; the ZIP is created only when successful downloads exist.
+For a download-only request, the report explicitly says contents were not reviewed;
 there is no extraction or content-model call. No empty document ZIP is written.
-`plan.json` records the original selection; use `review.json` to determine whether
-retrieval and content review actually completed. Completed work is preserved on
-partial failure, and failed reviews never become metadata summaries.
+`replies.json` describes the final outcome without requiring a separate review
+file. `plan.json`, `review.json`, and extracted-text JSON remain machine-readable
+state for diagnosis, integrity checks, and internal resume. Unverified/rejected
+model findings remain diagnostic data and are never published in the reply.
+Completed work is preserved on partial failure, and failed reviews never become
+metadata summaries. The pipeline never creates `review.md`.
 
 Exit codes: `0` for completion (including no matches), `2` for invalid input or
 clarification, `1` for failures or partial completion. A JSON batch exits `1` if

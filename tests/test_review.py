@@ -84,8 +84,7 @@ def test_complete_review_reports_citations_counts_and_exact_archive(workflow):
     assert payload['pages'][0]['spans'] == [{'source_id': 'C0001-p1-s1', 'text': TEXT}]
     assert all('tools' not in call.kwargs for call in parse.call_args_list)
     assert json.loads((directory / 'review.json').read_text()) == report
-    assert '[PDF page 1](downloads/C0001.pdf#page=1)' in (directory / 'review.md').read_text()
-    assert 'original metadata ranking' in (directory / 'review.md').read_text()
+    assert not list(directory.rglob('*.md'))
     with zipfile.ZipFile(directory / report['archive']['relative_path']) as archive:
         assert archive.testzip() is None
         assert set(archive.namelist()) == {'C0001.pdf', 'C0002.pdf'}
@@ -208,25 +207,26 @@ def test_interrupted_review_preserves_all_completed_downloads_and_manifest(workf
     assert report['archive']['document_count'] == 2
 
 
-def test_readable_output_failure_is_recorded_without_losing_completed_reviews(workflow, monkeypatch):
+@pytest.mark.parametrize('review_content', [True, False])
+def test_document_processing_never_writes_markdown(workflow, monkeypatch, review_content):
     from pathlib import Path
 
     directory, plan, browser, client, parse = workflow
     original = Path.write_text
 
     def write(path, *args, **kwargs):
-        if path.name == 'review.md':
-            raise PermissionError('Report is locked')
+        if path.suffix == '.md':
+            pytest.fail('Markdown reports must never be written')
         return original(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, 'write_text', write)
-    with pytest.raises(PermissionError):
-        asyncio.run(review.review_selected(directory, plan, client, planner._structured_call))
+    asyncio.run(review.review_selected(directory, plan, client, planner._structured_call,
+                                      review_content=review_content))
     report = json.loads((directory / 'review.json').read_text())
-    assert report['status'] == 'failed'
-    assert report['reviewed_count'] == 2
+    assert report['status'] == 'completed'
+    assert report['reviewed_count'] == (2 if review_content else 0)
     assert report['archive']['document_count'] == 2
-    assert 'could not be written' in report['error']['message']
+    assert not list(directory.rglob('*.md'))
 
 
 def test_no_matches_skip_browser_review_and_archive(workflow):
@@ -505,6 +505,6 @@ def test_download_only_processing_never_extracts_or_calls_model(workflow, monkey
     assert report['downloaded_count'] == 2 and report['reviewed_count'] == report['failed_count'] == 0
     assert all(x['status'] == 'downloaded' and x['review'] is None for x in report['documents'])
     assert report['archive']['document_count'] == 2
-    assert 'Selected document downloads' in (directory/'review.md').read_text()
+    assert not list(directory.rglob('*.md'))
     parse.assert_not_called()
     extract.assert_not_called()

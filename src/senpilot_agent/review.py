@@ -5,11 +5,9 @@ from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
-import re
 from uuid import uuid4
 import zipfile
 from typing import Literal
-from urllib.parse import quote
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -171,59 +169,9 @@ def validate_review(result: DocumentReview, candidate_id: str, pages: list[dict]
 
 
 def save_review(directory: Path, report: dict) -> None:
-    """Render only locally validated data; preserve rank and unsupported-file details."""
-    def escape(value):
-        return re.sub(r'([\\`*_{}\[\]<>|])', r'\\\1', str(value)).replace('\n', ' ')
-
-    lines = ['# PDF text review' if report.get('review_enabled', True) else '# Selected document downloads', '', report['basis'], '',
-             f"Status: {report['status']}", '',
-             f"Downloaded: {report['downloaded_count']}; reviewed: {report['reviewed_count']}; "
-                          f"failed: {report['failed_count']}.", '',
-             'Order below is the original metadata ranking. Content review does not rerank the shortlist.', '']
-    if report.get('error'):
-        lines.extend([escape(report['error']['message']), ''])
-    if report.get('clarification_question'):
-        lines.extend([escape(report['clarification_question']), ''])
-    for index, item in enumerate(report['documents'], 1):
-        lines.extend([f"## {index}. {escape(item['document_number'])} - {escape(item['title'])}", '',
-                      f"Categories: {escape(', '.join(item['categories']))}; "
-                      f"date: {escape(item['date'] or '(not provided)')}", '',
-                      f"Status: {item['status']}", ''])
-        if item.get('download'):
-            path = quote(item['download']['relative_path'], safe='/')
-            lines.extend([f'[Downloaded file]({path})', '', f"SHA-256: `{item['download']['sha256']}`", ''])
-        if item.get('error'):
-            lines.extend([escape(item['error']['message']), ''])
-        if item.get('extraction'):
-            extraction = item['extraction']
-            lines.extend([f"Extraction: {extraction['status']}; pages: {extraction['page_count']}; "
-                          f"complete text coverage: {extraction['complete_text']}", ''])
-            for warning in extraction['warnings']:
-                lines.extend([escape(warning), ''])
-            if extraction['unreadable_pages']:
-                lines.extend([f"Pages without usable text: {extraction['unreadable_pages']}", ''])
-        if item.get('review'):
-            result = item['review']
-            lines.extend([f"Relevance: {result['relevance']}", ''])
-            for finding in result['findings']:
-                lines.extend([f"- {escape(finding['statement'])}", ''])
-                for citation in finding['citations']:
-                    target = quote(item['download']['relative_path'], safe='/')
-                    lines.extend([f"  [PDF page {citation['page']}]({target}#page={citation['page']}): "
-                                  f"{escape(citation['quote'])}", ''])
-            for limitation in result['limitations']:
-                lines.extend([f'Limitation: {escape(limitation)}', ''])
-    if report['archive']:
-        lines.extend([f"[Selected documents ZIP]({quote(report['archive']['relative_path'], safe='/')})", ''])
+    """Persist machine-readable state; email_flow renders the reply body."""
     report['finished_at'] = datetime.now(timezone.utc).isoformat()
     write_json(directory / 'review.json', report)
-    try:
-        (directory / 'review.md').write_text('\n'.join(lines), encoding='utf-8')
-    except OSError as exc:
-        report.update(status='failed', error={'type': type(exc).__name__,
-                      'message': 'Readable review report could not be written'})
-        write_json(directory / 'review.json', report)
-        raise
 
 
 def saved_path(directory: Path, relative: str, subdirectory: str | None = None) -> Path:

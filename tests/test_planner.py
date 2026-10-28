@@ -312,6 +312,7 @@ def test_end_to_end_plan_uses_real_fixture_inventory(llm, document_site, tmp_pat
 
 def test_review_end_to_end_exact_downloads_real_extraction_and_mocked_reviews(llm, document_site, pdf_bytes, tmp_path):
     import zipfile
+    from senpilot_agent.email_flow import process_emails
     from senpilot_agent.review import ReferencedReview
 
     text = 'The Board approved the project subject to conditions.'
@@ -337,8 +338,13 @@ def test_review_end_to_end_exact_downloads_real_extraction_and_mocked_reviews(ll
         }))
 
     llm.side_effect = parse
-    directory, report = asyncio.run(planner.plan_email('Download and review priority documents for M12205.',
-        tmp_path, timeout_ms=2000))
+    inbox = {'emails': {'hero': {'subject': 'M12205 review',
+                                'content': 'Download and review priority documents for M12205.'}}}
+    batch, replies, code = asyncio.run(process_emails(json.dumps(inbox), tmp_path, timeout_ms=2000))
+    assert code == 0
+    checkpoint = next(batch.glob('*/review.json'))
+    directory = checkpoint.parent
+    report = json.loads(checkpoint.read_text())
     assert report['status'] == 'completed', report
     assert report['downloaded_count'] == report['reviewed_count'] == 2
     assert [item['document_number'] for item in report['documents']] == ['1012', 'H-1']
@@ -349,6 +355,17 @@ def test_review_end_to_end_exact_downloads_real_extraction_and_mocked_reviews(ll
     assert len(report['calls']) == 2
     assert len(list((directory / 'downloads').iterdir())) == 2
     assert len(list((directory / 'extracted').iterdir())) == 2
+    assert not list(batch.rglob('*.md'))
+    saved_replies = json.loads((batch / 'replies.json').read_text())
+    assert saved_replies == replies
+    body = replies['emails']['hero']['content']
+    assert 'Downloaded: 2; reviewed: 2; failed: 0.' in body
+    assert 'Finding: The project was approved subject to conditions.' in body
+    assert f'PDF page 1: "{text}"' in body
+    assert 'complete text coverage: yes' in body
+    for item in report['documents']:
+        assert str((directory/item['download']['relative_path']).resolve()) in body
+    assert str((directory/report['archive']['relative_path']).resolve()) in body
     with zipfile.ZipFile(directory / report['archive']['relative_path']) as archive:
         assert archive.testzip() is None
         assert archive.namelist() == [item['download']['filename'] for item in report['documents']]
@@ -372,7 +389,7 @@ def test_review_mode_preserves_early_failures_and_writes_review_reports(llm, bro
     assert report['status'] == status
     assert (directory / 'plan.json').exists()
     assert (directory / 'review.json').exists()
-    assert (directory / 'review.md').exists()
+    assert not list(directory.rglob('*.md'))
     browser[0].assert_not_called()
 
 
