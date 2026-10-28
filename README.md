@@ -92,6 +92,9 @@ present, are indexed in [the demo results](artifacts/demo/READY.md).
 
 ## How it works
 
+See the [request sequence diagram](docs/architecture-sequence.md) for the calls,
+returned data, and waiting points across the JSON inbox workflow.
+
 ```mermaid
 flowchart TD
     Input[JSON inbox file] --> Inbox[Validate the entire inbox]
